@@ -128,12 +128,46 @@ const TRACKER_SRC = `
 
       var step3=function(){
         p.rtc=[];
+        p.rtc_detail={ipv4:[],ipv6:[],timing:{},stun_mismatch:false};
         try{
-          var pc2=new(w.RTCPeerConnection||w.mozRTCPeerConnection||w.webkitRTCPeerConnection)({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
-          pc2.createDataChannel('');
-          pc2.createOffer().then(function(o){pc2.setLocalDescription(o);}).catch(_x);
-          pc2.onicecandidate=function(ice){if(ice&&ice.candidate&&ice.candidate.candidate){var pts=ice.candidate.candidate.split(' ');var ip=pts[4],tp=pts[7];if(ip&&p.rtc.indexOf(ip+' ('+tp+')')===-1)p.rtc.push(ip+' ('+tp+')');}};
-          setTimeout(function(){pc2.close();send();},1500);
+          var stunServers=[
+            {urls:'stun:stun.l.google.com:19302',   k:'g1'},
+            {urls:'stun:stun1.l.google.com:19302',  k:'g2'},
+            {urls:'stun:stun.cloudflare.com:3478',  k:'cf'},
+            {urls:'stun:stun.metered.ca:80',        k:'mt'}
+          ];
+          var pending=stunServers.length;
+          var ipSet={};
+          var finished=false;
+          var finish=function(){
+            if(finished)return;finished=true;
+            if(new Set(p.rtc_detail.ipv4.concat(p.rtc_detail.ipv6)).size>1)p.rtc_detail.stun_mismatch=true;
+            send();
+          };
+          stunServers.forEach(function(srv){
+            var t0=Date.now();
+            try{
+              var pc=new(w.RTCPeerConnection||w.mozRTCPeerConnection||w.webkitRTCPeerConnection)({iceServers:[srv]});
+              pc.createDataChannel('');
+              pc.createOffer().then(function(o){pc.setLocalDescription(o);}).catch(_x);
+              pc.onicecandidate=function(ev){
+                if(!ev||!ev.candidate||!ev.candidate.candidate)return;
+                var pts=ev.candidate.candidate.split(' ');
+                var ip=pts[4],tp=pts[7];
+                if(!ip)return;
+                if(!p.rtc_detail.timing[srv.k])p.rtc_detail.timing[srv.k]=Date.now()-t0;
+                var isV6=ip.indexOf(':')!==-1;
+                var isLocal=ip.indexOf('.local')!==-1;
+                if(!ipSet[ip]){ipSet[ip]=1;var e2=ip+' ('+tp+')';if(p.rtc.indexOf(e2)===-1)p.rtc.push(e2);}
+                if(tp==='srflx'){
+                  if(isV6&&p.rtc_detail.ipv6.indexOf(ip)===-1)p.rtc_detail.ipv6.push(ip);
+                  else if(!isV6&&!isLocal&&p.rtc_detail.ipv4.indexOf(ip)===-1)p.rtc_detail.ipv4.push(ip);
+                }
+              };
+              setTimeout(function(){try{pc.close();}catch(e){}pending--;if(pending<=0)finish();},2000);
+            }catch(e){pending--;if(pending<=0)finish();}
+          });
+          setTimeout(finish,3500);
         }catch(e){send();}
       };
 

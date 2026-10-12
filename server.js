@@ -523,35 +523,59 @@ async function startServer() {
                          request.socket?.remoteAddress || '';
           let isVpn = false, vpnReasons = [];
           const resolved_ips = [];
-          if (decryptedBody.rtc) {
-            const srflxIps = decryptedBody.rtc.filter(i => i.includes('srflx')).map(i => i.split(' ')[0]);
-            const hostIps  = decryptedBody.rtc.filter(i => i.includes('host'));
-            if (srflxIps.length > 0 && !srflxIps.includes(httpIp) && httpIp !== '::1' && httpIp !== '127.0.0.1') {
-              isVpn = true; vpnReasons.push('WebRTC Bypass: true IP leaked');
+          const rtcDetail = decryptedBody.rtc_detail || {};
+          const rtcIps    = decryptedBody.rtc || [];
+
+          if (rtcIps.length > 0 || rtcDetail.ipv4 || rtcDetail.ipv6) {
+            const srflxIps = rtcIps.filter(i => i.includes('srflx')).map(i => i.split(' ')[0]);
+            const hostIps  = rtcIps.filter(i => i.includes('host'));
+            const ipv4     = rtcDetail.ipv4 || srflxIps.filter(ip => !ip.includes(':'));
+            const ipv6     = rtcDetail.ipv6 || [];
+
+            // 1) Classic WebRTC bypass: srflx ≠ HTTP IP
+            if (ipv4.length > 0 && !ipv4.includes(httpIp) && httpIp !== '::1' && httpIp !== '127.0.0.1') {
+              isVpn = true; vpnReasons.push('WebRTC Bypass: srflx IP differs from HTTP IP');
             }
-            if (srflxIps.length > 1) { isVpn = true; vpnReasons.push('Multi-Routing detected'); }
-            if (hostIps.length  > 1) { isVpn = true; vpnReasons.push('Adapter Anomaly'); }
-            if (decryptedBody.rtc.length === 0) { isVpn = true; vpnReasons.push('WebRTC Blocked'); }
+            // 2) IPv6 leak — VPNs rarely route IPv6, so v6 = real IP
+            if (ipv6.length > 0) {
+              isVpn = true; vpnReasons.push(`IPv6 Leak: real IPv6 detected (${ipv6[0]}) — VPN does not tunnel IPv6`);
+            }
+            // 3) STUN mismatch — different srflx from different STUN servers = split tunneling
+            if (rtcDetail.stun_mismatch) {
+              isVpn = true; vpnReasons.push('STUN Mismatch: different IPs from different STUN servers — split tunneling active');
+            }
+            // 4) Multiple srflx IPs from same collection = multi-hop / dual-gateway
+            if (ipv4.length > 1) { isVpn = true; vpnReasons.push(`Multi-Routing: ${ipv4.length} srflx IPs detected`); }
+            // 5) Multiple host adapters (VPN TAP/TUN)
+            if (hostIps.length > 1) { isVpn = true; vpnReasons.push('Adapter Anomaly: multiple network adapters'); }
+            // 6) WebRTC completely blocked (VPN killswitch)
+            if (rtcIps.length === 0) { isVpn = true; vpnReasons.push('WebRTC Blocked: UDP firewall or VPN killswitch'); }
           }
+
           try {
             const geoip = require('geoip-lite');
             const resolveIp = (ipStr, src) => {
               if (!ipStr || ipStr === '::1' || ipStr === '127.0.0.1') return;
+              if (ipStr.includes('.local')) return;
               if (resolved_ips.find(r => r.ip === ipStr)) return;
               const g = geoip.lookup(ipStr);
               if (g) {
                 resolved_ips.push({ ip: ipStr, source: src, city: g.city, country: g.country, timezone: g.timezone, latitude: g.ll?.[0], longitude: g.ll?.[1] });
                 if (decryptedBody.tm?.tz && g.timezone && decryptedBody.tm.tz !== g.timezone) {
                   isVpn = true;
-                  vpnReasons.push(`Timezone Mismatch (${src}): ${g.timezone} vs ${decryptedBody.tm.tz}`);
+                  vpnReasons.push(`Timezone Mismatch (${src}): IP→${g.timezone} vs Browser→${decryptedBody.tm.tz}`);
                 }
               }
             };
             resolveIp(httpIp, 'http');
-            if (decryptedBody.rtc) {
+            // Resolve all srflx IPs (v4 + v6)
+            const allSrflx = (rtcDetail.ipv4 || []).concat(rtcDetail.ipv6 || []);
+            if (allSrflx.length > 0) allSrflx.forEach(ip => resolveIp(ip, 'srflx'));
+            else if (decryptedBody.rtc) {
               decryptedBody.rtc.filter(i => i.includes('srflx')).map(i => i.split(' ')[0]).forEach(ip => resolveIp(ip, 'srflx'));
             }
           } catch(e) {}
+
           const entry = {
             id: crypto.randomBytes(8).toString('hex'),
             timestamp: new Date().toISOString(),
