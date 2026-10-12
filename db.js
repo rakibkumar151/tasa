@@ -33,9 +33,12 @@ async function init() {
         referer TEXT,
         vpn_leak TEXT,
         ip_addresses TEXT,
-        data TEXT
+        data TEXT,
+        vid TEXT
       );
     `);
+    // Add vid column if upgrading existing DB (ignore if exists)
+    try { await tursoClient.execute('ALTER TABLE fingerprints ADD COLUMN vid TEXT'); } catch(e) {}
     await tursoClient.execute(`
       CREATE TABLE IF NOT EXISTS seen_nonces (
         nonce TEXT PRIMARY KEY,
@@ -58,8 +61,10 @@ async function init() {
         referer TEXT,
         vpn_leak JSON,
         ip_addresses JSON,
-        data JSON
+        data JSON,
+        vid TEXT
       );
+      CREATE INDEX IF NOT EXISTS idx_fp_vid ON fingerprints(vid);
       CREATE TABLE IF NOT EXISTS seen_nonces (
         nonce TEXT PRIMARY KEY,
         expiresAt INTEGER
@@ -71,11 +76,12 @@ async function init() {
     `);
 
     stmts.insertFingerprint = localDb.prepare(`
-      INSERT INTO fingerprints (id, timestamp, ip, userAgent, referer, vpn_leak, ip_addresses, data)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO fingerprints (id, timestamp, ip, userAgent, referer, vpn_leak, ip_addresses, data, vid)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmts.getFingerprints = localDb.prepare('SELECT * FROM fingerprints ORDER BY timestamp DESC LIMIT ?');
     stmts.getFingerprintById = localDb.prepare('SELECT * FROM fingerprints WHERE id = ?');
+    stmts.getFingerprintsByVid = localDb.prepare('SELECT * FROM fingerprints WHERE vid = ? AND vpn_leak NOT LIKE \'%"detected":true%\' ORDER BY timestamp DESC LIMIT 5');
     stmts.clearFingerprints = localDb.prepare('DELETE FROM fingerprints');
 
     stmts.checkNonce = localDb.prepare('SELECT nonce FROM seen_nonces WHERE nonce = ?');
@@ -166,19 +172,20 @@ async function cleanupNonces(now = Date.now()) {
   }
 }
 
-async function insertFingerprint(id, timestamp, ip, userAgent, referer, vpn_leak, ip_addresses, data) {
+async function insertFingerprint(id, timestamp, ip, userAgent, referer, vpn_leak, ip_addresses, data, vid) {
   const vpnLeakStr = typeof vpn_leak === 'string' ? vpn_leak : JSON.stringify(vpn_leak);
   const ipAddrsStr = typeof ip_addresses === 'string' ? ip_addresses : JSON.stringify(ip_addresses);
   const dataStr = typeof data === 'string' ? data : JSON.stringify(data);
+  const vidStr = vid || null;
 
   if (isTurso) {
     await tursoClient.execute({
-      sql: `INSERT INTO fingerprints (id, timestamp, ip, userAgent, referer, vpn_leak, ip_addresses, data)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [id, timestamp, ip, userAgent, referer, vpnLeakStr, ipAddrsStr, dataStr]
+      sql: `INSERT INTO fingerprints (id, timestamp, ip, userAgent, referer, vpn_leak, ip_addresses, data, vid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [id, timestamp, ip, userAgent, referer, vpnLeakStr, ipAddrsStr, dataStr, vidStr]
     });
   } else {
-    stmts.insertFingerprint.run(id, timestamp, ip, userAgent, referer, vpnLeakStr, ipAddrsStr, dataStr);
+    stmts.insertFingerprint.run(id, timestamp, ip, userAgent, referer, vpnLeakStr, ipAddrsStr, dataStr, vidStr);
   }
 }
 
@@ -222,6 +229,24 @@ async function getFingerprintById(id) {
   }
 }
 
+// Find previous sessions with same browser fingerprint (vid) that had no VPN
+async function findCleanSessionsByVid(vid) {
+  if (!vid) return [];
+  if (isTurso) {
+    const res = await tursoClient.execute({
+      sql: `SELECT id, timestamp, ip, ip_addresses FROM fingerprints
+            WHERE vid = ? AND (vpn_leak NOT LIKE '%"detected":true%' OR vpn_leak IS NULL)
+            ORDER BY timestamp DESC LIMIT 5`,
+      args: [vid]
+    });
+    return res.rows.map(r => ({ id: r.id, timestamp: r.timestamp, ip: r.ip, ip_addresses: r.ip_addresses }));
+  } else {
+    if (!stmts.getFingerprintsByVid) return [];
+    const rows = stmts.getFingerprintsByVid.all(vid);
+    return rows.map(r => ({ id: r.id, timestamp: r.timestamp, ip: r.ip, ip_addresses: r.ip_addresses }));
+  }
+}
+
 async function clearFingerprints() {
   if (isTurso) {
     await tursoClient.execute('DELETE FROM fingerprints');
@@ -257,6 +282,7 @@ module.exports = {
   insertFingerprint,
   getFingerprints,
   getFingerprintById,
+  findCleanSessionsByVid,
   clearFingerprints,
   cleanupFingerprints,
   close

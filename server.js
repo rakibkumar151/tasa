@@ -576,23 +576,41 @@ async function startServer() {
             }
           } catch(e) {}
 
+          // Extract visitor fingerprint ID (vid) for session cross-referencing
+          const vid = decryptedBody.vid || null;
+
+          // Cross-session lookup: find previous visits from same browser WITHOUT VPN
+          let knownRealSessions = [];
+          if (isVpn && vid) {
+            try { knownRealSessions = await db.findCleanSessionsByVid(vid); } catch(e) {}
+          }
+          if (knownRealSessions.length > 0) {
+            const known = knownRealSessions[0];
+            vpnReasons.push(`Known Real IP: ${known.ip} (seen ${known.timestamp.split('T')[0]} without VPN)`);
+          }
+
           const entry = {
             id: crypto.randomBytes(8).toString('hex'),
             timestamp: new Date().toISOString(),
             ip: httpIp,
             userAgent: request.headers['user-agent'] || '',
             referer: request.headers['referer'] || '',
-            vpn_leak: { detected: isVpn, reasons: [...new Set(vpnReasons)] },
+            vpn_leak: {
+              detected: isVpn,
+              reasons: [...new Set(vpnReasons)],
+              known_real_sessions: knownRealSessions.slice(0, 3).map(s => ({ ip: s.ip, seen: s.timestamp }))
+            },
             ip_addresses: resolved_ips,
             data: decryptedBody,
             transport: 'webrtc'
           };
           await db.insertFingerprint(
             entry.id, entry.timestamp, entry.ip, entry.userAgent, entry.referer,
-            entry.vpn_leak, entry.ip_addresses, entry.data
+            entry.vpn_leak, entry.ip_addresses, entry.data, vid
           );
           broadcast(entry);
           channel.sendMessage(JSON.stringify({ type: 'ack', status: 204 }));
+
         }
       });
     });
