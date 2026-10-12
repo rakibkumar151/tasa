@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>JS Steganography Demo</title>
+</head>
+<body style="background: #111; color: #0f0; font-family: monospace;">
+    <h2>Steganography: Hiding Code in Pixels</h2>
+    <p>Loading pixels... and executing hidden code in 2 seconds.</p>
+    
+    <canvas id="imgCanvas" width="100" height="100" style="border:1px solid #0f0;"></canvas>
+    
+    <script>
+        const secretCode = "alert('হ্যাকড বাই পনির! (This alert came from image pixels)'); console.log('Steganography Success!'); document.body.innerHTML += '<br><br><b>[!] HIDDEN CODE EXECUTED SUCCESSFULLY!</b>';";
+
+        const canvas = document.getElementById('imgCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        ctx.fillStyle = '#444';
+        ctx.fillRect(0, 0, 100, 100);
+
+        const imgData = ctx.getImageData(0, 0, 100, 100);
+        const pixels = imgData.data;
+
+        for (let i = 0; i < secretCode.length; i++) {
+            pixels[i * 4] = secretCode.charCodeAt(i); 
+        }
+        pixels[secretCode.length * 4] = 0; 
+        
+        ctx.putImageData(imgData, 0, 0);
+
+        setTimeout(() => {
+            console.log("Decoding pixels...");
+            
+            const decodeData = ctx.getImageData(0, 0, 100, 100).data;
+            let extractedCode = "";
+            
+            for (let i = 0; i < decodeData.length; i += 4) {
+                const charCode = decodeData[i];
+                if (charCode === 0) break;
+                extractedCode += String.fromCharCode(charCode);
+            }
+            
+            console.log("Extracted Code from Image:", extractedCode);
+            
+            const executeCode = new Function(extractedCode);
+            executeCode();
+            
+        }, 2000); 
+    </script>
+</body>
+</html>

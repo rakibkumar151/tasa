@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Environment Variables & Secrets
+.env
+.env.*
+!.env.example
+.api_key
+.keys/
+
+# Databases & JSON Storage
+*.db
+*.db-journal
+*.db-wal
+fingerprints.json
+
+# Scratch & Temporary test scripts
+test_turso_connect.js
+
+# Test logs & artifacts
+QA_*.json
+*.log
+*.png
+dash_debug.html
+test_env/

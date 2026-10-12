@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Custom JS VM Demo</title>
+</head>
+<body style="background: #111; color: #0f0; font-family: monospace;">
+    <h2>Custom JavaScript Virtual Machine (VM) PoC</h2>
+    <p>Executing custom bytecode... check console or wait for alert.</p>
+    
+    <script>
+        /**
+         * 1. THE ARCHITECTURE (Opcodes)
+         * We define our own fake assembly language.
+         */
+        const OP_PUSH = 1;
+        const OP_ADD  = 2;
+        const OP_LOG  = 3;
+        const OP_ALERT= 4;
+        const OP_HALT = 5;
+
+        /**
+         * 2. THE COMPILED BYTECODE (The Payload)
+         * Instead of sending "alert('Hacked')", we send an array of numbers.
+         * The hacker cannot read this array without understanding our custom VM architecture.
+         */
+        const payloadBytecode = [
+            OP_PUSH, "Target ", 
+            OP_PUSH, "Fingerprinted by Custom VM!", 
+            OP_ADD, 
+            OP_LOG,        // console.log("Target Fingerprinted by Custom VM!")
+            
+            OP_PUSH, "VM Execution Successful!",
+            OP_ALERT,      // alert("VM Execution Successful!")
+            
+            OP_HALT
+        ];
+
+        /**
+         * 3. THE VIRTUAL MACHINE (The Execution Engine)
+         * This tiny VM runs in the browser, reads the bytecode, and executes it.
+         */
+        function runVM(bytecode) {
+            let stack = [];
+            let ip = 0; // Instruction Pointer
+            
+            console.log("[VM] Booting up...");
+
+            while (ip < bytecode.length) {
+                let instruction = bytecode[ip++];
+                
+                switch (instruction) {
+                    case OP_PUSH:
+                        let val = bytecode[ip++];
+                        stack.push(val);
+                        break;
+                        
+                    case OP_ADD:
+                        let a = stack.pop();
+                        let b = stack.pop();
+                        stack.push(b + a); // order matters
+                        break;
+                        
+                    case OP_LOG:
+                        let logMsg = stack.pop();
+                        console.log("[VM OUTPUT] ->", logMsg);
+                        document.body.innerHTML += "<br>[VM OUTPUT] -> " + logMsg;
+                        break;
+                        
+                    case OP_ALERT:
+                        let alertMsg = stack.pop();
+                        alert(alertMsg);
+                        break;
+                        
+                    case OP_HALT:
+                        console.log("[VM] Execution Halted.");
+                        return;
+                        
+                    default:
+                        console.error("[VM] Invalid Opcode:", instruction);
+                        return;
+                }
+            }
+        }
+
+        // Execute the bytecode inside our custom VM!
+        setTimeout(() => {
+            runVM(payloadBytecode);
+        }, 1500);
+
+    </script>
+</body>
+</html>
