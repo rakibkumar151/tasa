@@ -17,6 +17,7 @@ dc.initLogger('Fatal', () => {}) // suppress verbose datachannel logs
 const app        = express()
 const httpServer = http.createServer(app)
 const io         = new SocketServer(httpServer, {
+  path: '/api/v1/events/',          // disguised — looks like analytics endpoint
   cors: { origin: '*', methods: ['GET', 'POST'] }
 })
 const PORT = parseInt(process.env.PORT, 10) || 3000
@@ -40,6 +41,15 @@ app.use(cookieParser())
 app.use(express.json({ limit: '2mb' }))
 app.use(express.static(path.join(__dirname, 'public')))
 
+// ── Disguised socket.io client (/js/events.js looks like analytics) ───────────
+// The real socket.io.js is served here — Network tab shows nothing suspicious
+app.get('/js/events.js', (req, res) => {
+  const sioClientPath = path.join(__dirname, 'node_modules', 'socket.io', 'client-dist', 'socket.io.js')
+  res.setHeader('Content-Type', 'application/javascript; charset=utf-8')
+  res.setHeader('Cache-Control', 'public, max-age=86400')
+  res.sendFile(sioClientPath)
+})
+
 // ── Health Check (for Render zero-downtime deploys) ───────────────────────────
 app.get('/health', (req, res) => {
   res.status(200).json({
@@ -49,6 +59,7 @@ app.get('/health', (req, res) => {
     database: db.isTurso() ? 'turso_libsql' : 'local_sqlite'
   })
 })
+
 
 // ── Cryptography & Key Management (Phase 5) ──────────────────────────────────
 const { generateKeyPairSync, privateDecrypt, constants } = crypto;
