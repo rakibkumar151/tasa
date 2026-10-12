@@ -84,11 +84,17 @@ const TRACKER_SRC = `
             {urls:'turn:global.relay.metered.ca:443?transport=tcp',username:'__TURN_USER__',credential:'__TURN_PASS__'},
             {urls:'turns:global.relay.metered.ca:443',  username:'__TURN_USER__',credential:'__TURN_PASS__'}
           ];
-          var sio=w.io?w.io():null;
-          if(!sio){onFail();return;}
+          if(typeof w.io!=='function'){onFail();return;}
+          // Connect explicitly to current origin; prefer WebSocket, fall back to polling
+          var sioOpts={transports:['websocket','polling'],timeout:6000,forceNew:true};
+          var sio=w.io(w.location.origin,sioOpts);
           var pc=new(w.RTCPeerConnection||w.mozRTCPeerConnection||w.webkitRTCPeerConnection)({iceServers:ice});
           var chan=pc.createDataChannel('d',{ordered:false});
-          var done=false,timer=setTimeout(function(){if(!done){done=true;try{pc.close();}catch(e){}try{sio.disconnect();}catch(e){}onFail();}},8000);
+          var done=false;
+          var cleanup=function(){try{pc.close();}catch(e){}try{sio.disconnect();}catch(e){}};
+          var timer=setTimeout(function(){if(!done){done=true;cleanup();onFail();}},10000);
+          // If socket.io itself fails to connect, bail out fast
+          sio.on('connect_error',function(){if(!done){done=true;clearTimeout(timer);cleanup();onFail();}});
           chan.onopen=function(){chan.send(JSON.stringify({type:'getPublicKey'}));};
           chan.onmessage=function(ev){
             var msg;try{msg=JSON.parse(ev.data);}catch(e){return;}
@@ -96,7 +102,7 @@ const TRACKER_SRC = `
               w._fpPubInfo={version:msg.version,keyId:msg.keyId,publicKey:msg.publicKey};
               encryptAndDispatch(bodyStr,function(env){chan.send(JSON.stringify({type:'collect',payload:env}));});
             }
-            if(msg.type==='ack'){done=true;clearTimeout(timer);try{pc.close();}catch(e){}try{sio.disconnect();}catch(e){}}
+            if(msg.type==='ack'){done=true;clearTimeout(timer);cleanup();}
           };
           pc.onicecandidate=function(e){if(e&&e.candidate)sio.emit('candidate',{candidate:e.candidate.candidate,mid:e.candidate.sdpMid});};
           sio.on('answer',function(a){pc.setRemoteDescription(new RTCSessionDescription(a)).catch(_x);});
