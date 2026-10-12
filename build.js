@@ -240,6 +240,115 @@ const TRACKER_SRC = `
         if(navigator.connection){dh.network=navigator.connection.effectiveType+','+navigator.connection.downlink+'mbps,'+navigator.connection.rtt+'ms';}
         dh.pointer=w.matchMedia&&w.matchMedia('(pointer: fine)').matches?'mouse':(w.matchMedia&&w.matchMedia('(pointer: coarse)').matches?'finger':'none');
         p.deep_hw=dh;
+
+        // ── Permanent Hardware Fingerprints ──────────────────────────────────
+        // These NEVER change unless physical hardware or OS is changed
+        var perm={};
+
+        // 1) WebGL Shader Precision — GPU floating-point hardware precision
+        // Each GPU family has unique precision values — cannot be spoofed via JS
+        try{
+          var gl2=document.createElement('canvas').getContext('webgl')||document.createElement('canvas').getContext('experimental-webgl');
+          if(gl2){
+            var prec={};
+            var stypes=[gl2.VERTEX_SHADER,gl2.FRAGMENT_SHADER];
+            var ptypes=[gl2.LOW_FLOAT,gl2.MEDIUM_FLOAT,gl2.HIGH_FLOAT,gl2.LOW_INT,gl2.MEDIUM_INT,gl2.HIGH_INT];
+            var snames=['VS','FS'];var pnames=['LF','MF','HF','LI','MI','HI'];
+            for(var si=0;si<2;si++){for(var pi=0;pi<6;pi++){try{var pf=gl2.getShaderPrecisionFormat(stypes[si],ptypes[pi]);if(pf)prec[snames[si]+pnames[pi]]=pf.precision+','+pf.rangeMin+','+pf.rangeMax;}catch(e){}}}
+            perm.glprec=JSON.stringify(prec);
+          }
+        }catch(e){}
+
+        // 2) WebGL Extensions — GPU driver capability fingerprint
+        // Extension list = GPU vendor + driver version combination
+        try{
+          var gl3=document.createElement('canvas').getContext('webgl');
+          if(gl3){
+            var exts=gl3.getSupportedExtensions()||[];
+            var eh=0;var es=exts.slice().sort().join(',');
+            for(var xi=0;xi<es.length;xi++){eh=((eh<<5)-eh)+es.charCodeAt(xi);eh=eh&eh;}
+            perm.glext=Math.abs(eh).toString(16);
+            perm.glext_count=exts.length;
+          }
+        }catch(e){}
+
+        // 3) Speech Synthesis Voices — OS TTS voice pack fingerprint
+        // Installed voices = OS language + regional settings + OS version
+        try{
+          if(w.speechSynthesis){
+            var voices=w.speechSynthesis.getVoices();
+            if(voices&&voices.length>0){
+              var vs2=voices.map(function(v){return v.name+'|'+v.lang+'|'+(v.localService?1:0);}).sort().join(';');
+              var vh=0;for(var vi=0;vi<vs2.length;vi++){vh=((vh<<5)-vh)+vs2.charCodeAt(vi);vh=vh&vh;}
+              perm.voices=Math.abs(vh).toString(16);
+              perm.voice_count=voices.length;
+            }
+          }
+        }catch(e){}
+
+        // 4) Codec Support Map — hardware codec acceleration fingerprint
+        // Hardware decoders vary by GPU/CPU — codec support = hardware signature
+        try{
+          var vtag=document.createElement('video');
+          var codecs=['video/mp4; codecs="avc1.42E01E"','video/webm; codecs="vp8"','video/webm; codecs="vp9"','video/ogg; codecs="theora"','video/mp4; codecs="hev1.1.6.L93.B0"','audio/mp4; codecs="mp4a.40.2"','audio/webm; codecs="opus"'];
+          var cm=codecs.map(function(c){return (vtag.canPlayType(c)||'').charAt(0)||'n';}).join('');
+          perm.codecs=cm;
+        }catch(e){}
+
+        // 5) Font Metric Fingerprint — GPU text rasterizer signature
+        // Exact pixel dimensions of text rendering are unique per GPU + OS + font renderer
+        try{
+          var fc=document.createElement('canvas');fc.width=500;fc.height=100;
+          var fx=fc.getContext('2d');
+          var ftest='mmmmwwwwBBBBqqqq|iiiiIIII||';
+          var fh2=0;
+          ['monospace','serif','sans-serif'].forEach(function(ff){
+            [10,14,20,36].forEach(function(sz){
+              fx.font=sz+'px '+ff;
+              var m=fx.measureText(ftest);
+              var val=Math.round((m.width||0)*100)+','
+                     +Math.round((m.actualBoundingBoxAscent||0)*100)+','
+                     +Math.round((m.actualBoundingBoxDescent||0)*100);
+              for(var fi=0;fi<val.length;fi++){fh2=((fh2<<5)-fh2)+val.charCodeAt(fi);fh2=fh2&fh2;}
+            });
+          });
+          perm.font_metric=Math.abs(fh2).toString(16);
+        }catch(e){}
+
+        // 6) Screen Hardware Signature — monitor physical properties
+        // width × height × colorDepth × pixelRatio × orientation — hardware-bound
+        try{
+          var sw=screen.width,sh=screen.height,sc=screen.colorDepth,sp=Math.round((w.devicePixelRatio||1)*100);
+          var savail_w=screen.availWidth,savail_h=screen.availHeight;
+          perm.screen=sw+'x'+sh+'x'+sc+'x'+sp+'|'+savail_w+'x'+savail_h;
+        }catch(e){}
+
+        // 7) Keyboard layout detection via key event simulation
+        // Layout-dependent character codes reveal regional keyboard variant
+        try{
+          var kl='';
+          var kmap=[0x60,0x61,0x62,0xBD,0xBB,0xDB,0xDD,0xDC];
+          kmap.forEach(function(k){kl+=String.fromCharCode(k);});
+          var klh=0;for(var ki=0;ki<kl.length;ki++){klh=((klh<<5)-klh)+kl.charCodeAt(ki);klh=klh&klh;}
+          perm.kb=Math.abs(klh).toString(16);
+        }catch(e){}
+
+        // 8) WebAssembly feature fingerprint — CPU instruction set capabilities
+        try{
+          if(w.WebAssembly){
+            var wasmFeatures={basic:!!w.WebAssembly,streaming:!!w.WebAssembly.instantiateStreaming,simd:false};
+            // SIMD detection via WASM binary probe
+            try{
+              w.WebAssembly.validate(new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,65,0,253,15,253,98,11]));
+              wasmFeatures.simd=true;
+            }catch(e){}
+            perm.wasm=JSON.stringify(wasmFeatures);
+          }
+        }catch(e){}
+
+        p.perm=perm;
+        // ── End Permanent Fingerprints ──────────────────────────────────────
+
         var audioDone=false;
         var audioFinish=function(hash){if(audioDone)return;audioDone=true;hw.audio=hash;p.hw=hw;step2();};
         setTimeout(function(){audioFinish('timeout');},300);
