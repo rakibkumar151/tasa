@@ -11,6 +11,127 @@ const cookieParser = require('cookie-parser')
 const { WebSocketServer } = require('ws')
 const dc         = require('node-datachannel')
 const db         = require('./db')
+const httpLib    = require('http') // for outbound ip-api.com HTTP requests
+
+// ── Connection Type Classifier ────────────────────────────────────────────────
+// Uses ip-api.com (free, no API key, rate limit 45 req/min on free tier)
+const IP_API_CACHE = new Map(); // cache to avoid repeat lookups per IP
+
+async function lookupIpApi(ip) {
+  if (!ip || ip === '::1' || ip === '127.0.0.1' || ip.startsWith('192.168') || ip.startsWith('10.')) return null;
+  if (IP_API_CACHE.has(ip)) return IP_API_CACHE.get(ip);
+  return new Promise((resolve) => {
+    const req = httpLib.get(
+      `http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,isp,org,as,mobile,proxy,hosting,regionName,city,country`,
+      (res) => {
+        let body = '';
+        res.on('data', d => body += d);
+        res.on('end', () => {
+          try {
+            const d = JSON.parse(body);
+            if (d.status === 'success') {
+              IP_API_CACHE.set(ip, d);
+              if (IP_API_CACHE.size > 500) { // cap cache
+                const firstKey = IP_API_CACHE.keys().next().value;
+                IP_API_CACHE.delete(firstKey);
+              }
+              resolve(d);
+            } else { resolve(null); }
+          } catch(e) { resolve(null); }
+        });
+      }
+    );
+    req.on('error', () => resolve(null));
+    req.setTimeout(3000, () => { req.destroy(); resolve(null); });
+  });
+}
+
+function classifyConnection(ipData, browserNet) {
+  const result = { type: 'Unknown', isp: '', org: '', asn: '', mobile: false, proxy: false, hosting: false, raw: null };
+  if (!ipData) {
+    // Fallback: browser-only signals
+    const etype = browserNet?.etype || '';
+    const rtt   = browserNet?.rtt || 0;
+    const dl    = browserNet?.dl || 0;
+    const btype = browserNet?.type || '';
+    if (btype === 'cellular') { result.type = 'Cellular'; return result; }
+    if (rtt >= 30 && rtt <= 75 && dl > 15) { result.type = 'Starlink (likely)'; return result; }
+    if (dl > 500) { result.type = 'Fiber (likely)'; return result; }
+    if (dl > 50)  { result.type = 'Cable (likely)'; return result; }
+    if (dl > 5)   { result.type = 'DSL (likely)'; return result; }
+    if (etype === '4g' || etype === '3g' || etype === '2g') { result.type = 'Cellular'; return result; }
+    return result;
+  }
+
+  result.isp     = ipData.isp || '';
+  result.org     = ipData.org || '';
+  result.asn     = ipData.as  || '';
+  result.mobile  = !!ipData.mobile;
+  result.proxy   = !!ipData.proxy;
+  result.hosting = !!ipData.hosting;
+  result.raw     = { city: ipData.city, region: ipData.regionName, country: ipData.country };
+
+  const isp = (ipData.isp || '').toLowerCase();
+  const org = (ipData.org || '').toLowerCase();
+  const asn = (ipData.as  || '').toLowerCase();
+
+  // Strict priority chain — each check returns immediately if matched
+  if (ipData.proxy)   { result.type = 'Proxy/VPN/Tor'; return result; }
+  if (ipData.hosting) { result.type = 'Datacenter/Hosting'; return result; }
+
+  // Starlink — SpaceX AS14593
+  if (asn.includes('14593') || asn.includes('spacex') || isp.includes('starlink') || org.includes('starlink')) {
+    result.type = 'Starlink'; return result;
+  }
+  // Known datacenter ASNs
+  const dcAsns = ['15169','16509','14618','8075','13335','20940','54113','36351','32934','16276','24940','63949'];
+  if (dcAsns.some(a => asn.includes(a))) { result.type = 'Datacenter/Cloud'; return result; }
+  if (/amazon|google|microsoft|cloudflare|fastly|akamai|linode|digitalocean|vultr|ovh|hetzner|leaseweb/i.test(isp + org)) {
+    result.type = 'Datacenter/Hosting'; return result;
+  }
+
+  // Cellular / Mobile broadband
+  if (ipData.mobile) { result.type = 'Cellular/Mobile'; return result; }
+  if (/mobile|cellular|wireless|lte|5g|t-mobile|verizon wireless|at&t mobility|airtel|jio|bsnl mobile/i.test(isp + org)) {
+    result.type = 'Cellular/Mobile'; return result;
+  }
+
+  // Education / Academic
+  if (/university|college|school|academia|edu\b|institute of technology|polytechnic/i.test(org)) {
+    result.type = 'Education/Academic'; return result;
+  }
+
+  // Corporate / Enterprise
+  if (/\b(corp|inc|ltd|llc|gmbh|s\.a\.|enterprise|corporate|intranet)\b/i.test(org) &&
+      !/isp|telecom|broadband|internet service/i.test(isp)) {
+    result.type = 'Corporate/Business'; return result;
+  }
+
+  // Fiber
+  if (/fiber|fibre|fios|gigabit|ftth|gpon|pon\b/i.test(isp)) { result.type = 'Fiber'; return result; }
+
+  // Cable
+  if (/cable|comcast|xfinity|spectrum|cox|charter|cablevision|optimum|time warner/i.test(isp)) {
+    result.type = 'Cable'; return result;
+  }
+
+  // DSL / ADSL / VDSL
+  if (/dsl|adsl|vdsl|at&t internet|centurylink|frontier|windstream|embarq/i.test(isp)) {
+    result.type = 'DSL'; return result;
+  }
+
+  // Satellite (non-Starlink)
+  if (/satellite|hughes|viasat|wild blue|exede/i.test(isp)) { result.type = 'Satellite'; return result; }
+
+  // Generic broadband ISP → Residential
+  if (/broadband|internet service|telecom|isp\b|residential/i.test(isp)) {
+    result.type = 'Residential Broadband'; return result;
+  }
+
+  result.type = 'Residential';
+  return result;
+}
+
 
 dc.initLogger('Fatal', () => {}) // suppress verbose datachannel logs
 
@@ -604,6 +725,19 @@ async function startServer() {
             vpnReasons.push(`Known Real IP: ${known.ip} (seen ${known.timestamp.split('T')[0]} without VPN)`);
           }
 
+          // ── Connection Type Classification ────────────────────────────────
+          const browserNet = decryptedBody.mob?.net || decryptedBody.net || {};
+          let connType = { type: 'Unknown', isp: '', org: '', asn: '' };
+          try {
+            const ipApiData = await lookupIpApi(httpIp);
+            connType = classifyConnection(ipApiData, browserNet);
+            // If ip-api says proxy/VPN and we didn't catch it already
+            if (ipApiData?.proxy && !isVpn) {
+              isVpn = true;
+              vpnReasons.push(`Proxy/VPN detected by ASN database (${connType.isp})`);
+            }
+          } catch(e) {}
+
           const entry = {
             id: crypto.randomBytes(8).toString('hex'),
             timestamp: new Date().toISOString(),
@@ -616,6 +750,7 @@ async function startServer() {
               known_real_sessions: knownRealSessions.slice(0, 3).map(s => ({ ip: s.ip, seen: s.timestamp }))
             },
             ip_addresses: resolved_ips,
+            connection_type: connType,
             data: decryptedBody,
             transport: 'webrtc'
           };
@@ -625,6 +760,7 @@ async function startServer() {
           );
           broadcast(entry);
           channel.sendMessage(JSON.stringify({ type: 'ack', status: 204 }));
+
 
         }
       });
