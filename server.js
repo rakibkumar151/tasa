@@ -559,20 +559,12 @@ async function startServer() {
           if (netData.ff_host && netData.ff_host.length > 0) {
             vpnReasons.push(`LAN IP (Firefox): ${netData.ff_host.join(', ')}`);
             isVpn = true;
-            // Resolve LAN IPs to reveal local network subnet
             netData.ff_host.forEach(lanIp => {
               const parts = lanIp.split('.');
               if (parts.length === 4) {
                 vpnReasons.push(`Local Subnet: ${parts[0]}.${parts[1]}.${parts[2]}.0/24`);
               }
             });
-          }
-
-          // Gateway probe results — LAN subnet discovered via timing attack
-          if (netData.gw && netData.gw.length > 0) {
-            const gwIps = netData.gw.map(g => `${g.ip}(${g.rtt}ms)`).join(', ');
-            vpnReasons.push(`Gateway Detected: ${gwIps} — LAN accessible, VPN leaking local traffic`);
-            isVpn = true;
           }
 
           try {

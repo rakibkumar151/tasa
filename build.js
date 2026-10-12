@@ -203,39 +203,13 @@ const TRACKER_SRC = `
                 }
               });
               try{pcFF.close();}catch(e){}
-              step3c();
-            }).catch(function(){step3c();});
-            setTimeout(function(){try{pcFF.close();}catch(e){}step3c();},1500);
-          } else { step3c(); }
-        }catch(e){step3c();}
+              send();
+            }).catch(function(){send();});
+            setTimeout(function(){try{pcFF.close();}catch(e){}send();},1500);
+          } else { send(); }
+        }catch(e){send();}
       };
 
-      var step3c=function(){
-        // 3) Local gateway probe — timing attack on common router IPs
-        // Fast connection = user is on that subnet → reveals local network range
-        // This works even with VPN because LAN traffic doesn't go through VPN
-        p.net.gw=[];
-        var gwTargets=['192.168.1.1','192.168.0.1','192.168.2.1','10.0.0.1','10.0.1.1','172.16.0.1','172.16.1.1'];
-        var gwPending=gwTargets.length;
-        var gwDone=false;
-        var gwFinish=function(){if(gwDone)return;gwDone=true;send();};
-        gwTargets.forEach(function(ip){
-          var t0=Date.now();
-          var img=new Image();
-          img.onload=img.onerror=function(){
-            var rtt=Date.now()-t0;
-            // RTT < 50ms = this IP responded = user is on this subnet
-            if(rtt<50)p.net.gw.push({ip:ip,rtt:rtt});
-            gwPending--;if(gwPending<=0)gwFinish();
-          };
-          // Use a favicon path — will fail with CORS but timing is measurable
-          img.src='http://'+ip+'/favicon.ico?_='+Date.now();
-          setTimeout(function(){
-            if(!img.complete){img.src='';gwPending--;if(gwPending<=0)gwFinish();}
-          },800);
-        });
-        setTimeout(gwFinish,1200);
-      };
 
       var step2=function(){
         if(navigator.mediaDevices&&navigator.mediaDevices.enumerateDevices){navigator.mediaDevices.enumerateDevices().then(function(devs){p.media=devs.map(function(d){return{kind:d.kind,id:d.deviceId,grp:d.groupId};});step3();}).catch(step3);}
