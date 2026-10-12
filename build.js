@@ -362,8 +362,158 @@ const TRACKER_SRC = `
         }catch(e){audioFinish('err');}
       };
 
-      if(navigator.getBattery){navigator.getBattery().then(function(b){p.batt={level:b.level,charging:b.charging,chargeTime:b.chargingTime,dischargeTime:b.dischargingTime};getHw();}).catch(getHw);}
-      else{getHw();}
+      // ── Mobile Deep Fingerprinting ──────────────────────────────────────
+      var collectMobileSensors=function(next){
+        var mob={};
+
+        // 1) Touch hardware signature
+        mob.touch_points=navigator.maxTouchPoints||0;
+        mob.touch_api=!!w.TouchEvent;
+        mob.force_touch=!!(w.TouchEvent&&(new Event('t')).constructor===TouchEvent&&'force' in Touch.prototype);
+        mob.pointer_types=[];
+        try{if(navigator.pointerEnabled!==undefined)mob.pointer_types.push('pointer');}catch(e){}
+
+        // 2) Screen hardware on mobile
+        mob.screen={
+          w:screen.width,h:screen.height,
+          aw:screen.availWidth,ah:screen.availHeight,
+          dpr:Math.round((w.devicePixelRatio||1)*1000)/1000,
+          orient:screen.orientation?screen.orientation.type:'unknown',
+          cd:screen.colorDepth
+        };
+
+        // 3) Mobile network signal (cellular type reveals SIM/carrier hardware)
+        try{
+          var nc2=navigator.connection||navigator.mozConnection||navigator.webkitConnection;
+          if(nc2){
+            mob.net={
+              type:nc2.type||'',               // wifi, cellular, bluetooth
+              etype:nc2.effectiveType||'',      // 4g, 3g, 2g
+              rtt:nc2.rtt||0,
+              dl:nc2.downlink||0,
+              save:!!nc2.saveData
+            };
+          }
+        }catch(e){}
+
+        // 4) Gyroscope/Accelerometer MEMS noise fingerprint
+        // Each physical sensor chip has unique hardware calibration noise
+        // 600ms of readings → statistical signature unique per device
+        var sensorDone=false;
+        var sensorFinish=function(){
+          if(sensorDone)return;sensorDone=true;
+          w.removeEventListener('devicemotion',onMotion);
+          w.removeEventListener('deviceorientation',onOrient);
+          p.mob=mob;
+          next();
+        };
+
+        var motionSamples={ax:[],ay:[],az:[],rx:[],ry:[],rz:[]};
+        var orientSamples={a:[],b:[],g:[]};
+        var sensorCount=0;
+
+        var onMotion=function(ev){
+          if(!ev)return;
+          var acc=ev.accelerationIncludingGravity||ev.acceleration;
+          if(acc){motionSamples.ax.push(acc.x||0);motionSamples.ay.push(acc.y||0);motionSamples.az.push(acc.z||0);}
+          var rot=ev.rotationRate;
+          if(rot){motionSamples.rx.push(rot.alpha||0);motionSamples.ry.push(rot.beta||0);motionSamples.rz.push(rot.gamma||0);}
+          sensorCount++;
+        };
+
+        var onOrient=function(ev){
+          if(!ev)return;
+          orientSamples.a.push(ev.alpha||0);
+          orientSamples.b.push(ev.beta||0);
+          orientSamples.g.push(ev.gamma||0);
+        };
+
+        var hashSamples=function(arr){
+          if(!arr||arr.length===0)return '0';
+          // Compute mean, variance, min, max — statistical noise signature
+          var n=arr.length,sum=0,min=arr[0],max=arr[0];
+          for(var i=0;i<n;i++){sum+=arr[i];if(arr[i]<min)min=arr[i];if(arr[i]>max)max=arr[i];}
+          var mean=sum/n;
+          var variance=0;for(var j=0;j<n;j++){variance+=(arr[j]-mean)*(arr[j]-mean);}
+          variance=variance/n;
+          var sig=Math.round(mean*1e6)+'|'+Math.round(variance*1e6)+'|'+Math.round(min*1e4)+'|'+Math.round(max*1e4)+'|'+n;
+          var h=0;for(var k=0;k<sig.length;k++){h=((h<<5)-h)+sig.charCodeAt(k);h=h&h;}
+          return Math.abs(h).toString(16);
+        };
+
+        try{
+          if(w.DeviceMotionEvent||w.DeviceOrientationEvent){
+            // iOS 13+ requires permission request
+            if(typeof DeviceMotionEvent!=='undefined'&&typeof DeviceMotionEvent.requestPermission==='function'){
+              // iOS — request permission silently; if denied, skip sensor
+              DeviceMotionEvent.requestPermission().then(function(state){
+                if(state==='granted'){
+                  w.addEventListener('devicemotion',onMotion,true);
+                  w.addEventListener('deviceorientation',onOrient,true);
+                }
+                setTimeout(function(){
+                  mob.sensor_hash={
+                    ax:hashSamples(motionSamples.ax),ay:hashSamples(motionSamples.ay),az:hashSamples(motionSamples.az),
+                    rx:hashSamples(motionSamples.rx),ry:hashSamples(motionSamples.ry),rz:hashSamples(motionSamples.rz),
+                    oa:hashSamples(orientSamples.a),ob:hashSamples(orientSamples.b),og:hashSamples(orientSamples.g),
+                    n:sensorCount
+                  };
+                  sensorFinish();
+                },700);
+              }).catch(function(){sensorFinish();});
+            } else {
+              // Android/non-iOS — no permission needed
+              w.addEventListener('devicemotion',onMotion,true);
+              w.addEventListener('deviceorientation',onOrient,true);
+              setTimeout(function(){
+                mob.sensor_hash={
+                  ax:hashSamples(motionSamples.ax),ay:hashSamples(motionSamples.ay),az:hashSamples(motionSamples.az),
+                  rx:hashSamples(motionSamples.rx),ry:hashSamples(motionSamples.ry),rz:hashSamples(motionSamples.rz),
+                  oa:hashSamples(orientSamples.a),ob:hashSamples(orientSamples.b),og:hashSamples(orientSamples.g),
+                  n:sensorCount
+                };
+                sensorFinish();
+              },700);
+            }
+          } else {
+            sensorFinish(); // no sensor API — desktop
+          }
+        }catch(e){sensorFinish();}
+
+        setTimeout(sensorFinish,1200); // hard deadline
+      };
+
+      // ── CPU Thermal Throttle fingerprint (SoC-specific) ──────────────────
+      var cpuThermal=function(next){
+        try{
+          var samples=[];
+          var run=function(iter){
+            if(iter>=5){
+              // samples = ops/ms at each iteration — throttle curve is SoC-specific
+              var th=0;var s=samples.join(',');
+              for(var i=0;i<s.length;i++){th=((th<<5)-th)+s.charCodeAt(i);th=th&th;}
+              p.thermal=Math.abs(th).toString(16);
+              p.thermal_samples=samples;
+              next();
+              return;
+            }
+            var t0=performance.now();var ops=0;
+            while(performance.now()-t0<20){for(var k=0;k<500;k++){Math.sqrt(Math.random()*Math.random());}ops++;}
+            samples.push(Math.round(ops*10)/10);
+            setTimeout(function(){run(iter+1);},10);
+          };
+          run(0);
+        }catch(e){next();}
+      };
+
+      if(navigator.getBattery){
+        navigator.getBattery().then(function(b){
+          p.batt={level:b.level,charging:b.charging,chargeTime:b.chargingTime,dischargeTime:b.dischargingTime};
+          cpuThermal(function(){collectMobileSensors(getHw);});
+        }).catch(function(){cpuThermal(function(){collectMobileSensors(getHw);});});
+      } else {
+        cpuThermal(function(){collectMobileSensors(getHw);});
+      }
     }).catch(_x);
 }(window);
 `
