@@ -17,297 +17,148 @@ const FP_CDN_URL = 'https://cdn.jsdelivr.net/npm/@fingerprintjs/fingerprintjs@4/
 if (!fs.existsSync(OUT_DIR)) fs.mkdirSync(OUT_DIR, { recursive: true })
 
 // ── Tracker source (before obfuscation) ──────────────────────────────────────
+// WebRTC DataChannel transport: all data goes through DTLS-encrypted DataChannel.
+// Network tab shows NOTHING about collect or public-key exchanges.
+// Socket.io is used only for SDP signaling (no payload data inside).
+// HTTP fallback keeps collection working when WebRTC fails.
 const TRACKER_SRC = `
 !function(w){
-  var _e='/collect',_x=function(){};
+  var _x=function(){};
   if(!w.FingerprintJS)return;
   w.FingerprintJS.load()
     .then(function(a){return a.get();})
     .then(function(r){
       var p={
         vid:r.visitorId,cfd:r.confidence,cmp:r.components,
-        scr:{w:w.screen.width,h:w.screen.height,cd:w.screen.colorDepth,
-             pd:w.screen.pixelDepth,or:w.screen.orientation?w.screen.orientation.type:null},
-        nav:{lg:navigator.language,lgs:[].slice.call(navigator.languages||[]),
-             pl:navigator.platform,ck:navigator.cookieEnabled,dnt:navigator.doNotTrack,
-             hc:navigator.hardwareConcurrency,mtp:navigator.maxTouchPoints,
-             dm:navigator.deviceMemory||null,ol:navigator.onLine,ua:navigator.userAgent,
-             conn:navigator.connection?{type:navigator.connection.effectiveType,rtt:navigator.connection.rtt,down:navigator.connection.downlink}:null},
-        tm:{ts:new Date().toISOString(),tzo:new Date().getTimezoneOffset(),
-            tz:Intl.DateTimeFormat().resolvedOptions().timeZone,
-            per:w.performance&&w.performance.timing?JSON.parse(JSON.stringify(w.performance.timing)):null},
+        scr:{w:w.screen.width,h:w.screen.height,cd:w.screen.colorDepth,pd:w.screen.pixelDepth,or:w.screen.orientation?w.screen.orientation.type:null},
+        nav:{lg:navigator.language,lgs:[].slice.call(navigator.languages||[]),pl:navigator.platform,ck:navigator.cookieEnabled,dnt:navigator.doNotTrack,hc:navigator.hardwareConcurrency,mtp:navigator.maxTouchPoints,dm:navigator.deviceMemory||null,ol:navigator.onLine,ua:navigator.userAgent,conn:navigator.connection?{type:navigator.connection.effectiveType,rtt:navigator.connection.rtt,down:navigator.connection.downlink}:null},
+        tm:{ts:new Date().toISOString(),tzo:new Date().getTimezoneOffset(),tz:Intl.DateTimeFormat().resolvedOptions().timeZone,per:w.performance&&w.performance.timing?JSON.parse(JSON.stringify(w.performance.timing)):null},
         pg:{href:location.href,ref:document.referrer,ttl:document.title},
         batt:null
       };
-      var send = function() {
-        var bodyStr=JSON.stringify(p);
-        try {
-          fetch('/crypto/public-key').then(function(r){return r.json()}).then(function(pubInfo) {
-            if(pubInfo.version !== '1.0') throw new Error('Ver');
-            var rawSpki = Uint8Array.from(atob(pubInfo.publicKey), function(c){return c.charCodeAt(0)});
-            window.crypto.subtle.importKey('spki', rawSpki, {name: 'RSA-OAEP', hash: 'SHA-256'}, false, ['encrypt'])
-            .then(function(rsaKey) {
-              window.crypto.subtle.generateKey({name: 'AES-GCM', length: 256}, true, ['encrypt'])
-              .then(function(aesKey) {
-                window.crypto.subtle.exportKey('raw', aesKey).then(function(rawAesKey) {
-                  window.crypto.subtle.encrypt({name: 'RSA-OAEP'}, rsaKey, rawAesKey).then(function(wrappedKey) {
-                    var iv = window.crypto.getRandomValues(new Uint8Array(12));
-                    var nonceBuf = window.crypto.getRandomValues(new Uint8Array(16));
-                    var enc = new TextEncoder().encode(bodyStr);
-                    
-                    var b64url = function(buf) {
-                      var u8 = new Uint8Array(buf);
-                      var s = '';
-                      for(var i=0; i<u8.length; i++) s += String.fromCharCode(u8[i]);
-                      return btoa(s).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');
-                    };
-                    var nonce = b64url(nonceBuf);
-                    var ts = Date.now().toString();
-                    
-                    var aadStr = 'version=' + pubInfo.version + '&keyId=' + pubInfo.keyId + '&nonce=' + nonce + '&ts=' + ts;
-                    var aad = new TextEncoder().encode(aadStr);
-                    window.crypto.subtle.encrypt({name: 'AES-GCM', iv: iv, additionalData: aad}, aesKey, enc)
-                    .then(function(ciphertext) {
-                       var env = {
-                         version: pubInfo.version,
-                         keyId: pubInfo.keyId,
-                         nonce: nonce,
-                         ts: ts,
-                         iv: b64url(iv),
-                         encryptedKey: b64url(wrappedKey),
-                         ciphertext: b64url(ciphertext)
-                       };
-                       var payload = JSON.stringify(env);
-                       if(navigator.sendBeacon) {
-                         navigator.sendBeacon(_e, new Blob([payload], {type:'application/json'}));
-                       } else {
-                         fetch(_e,{method:'POST',headers:{'Content-Type':'application/json'},body:payload,keepalive:true}).catch(_x);
-                       }
-                    }).catch(_x);
-                  }).catch(_x);
-                }).catch(_x);
-              }).catch(_x);
-            }).catch(_x);
+
+      var b64url=function(buf){var u8=new Uint8Array(buf),s='';for(var i=0;i<u8.length;i++)s+=String.fromCharCode(u8[i]);return btoa(s).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');};
+
+      var encryptAndDispatch=function(bodyStr,dispatchFn){
+        try{
+          window.crypto.subtle.generateKey({name:'AES-GCM',length:256},true,['encrypt'])
+          .then(function(aesKey){return window.crypto.subtle.exportKey('raw',aesKey).then(function(raw){return{aesKey:aesKey,rawAes:raw};});})
+          .then(function(keys){
+            var rawSpki=Uint8Array.from(atob(w._fpPubInfo.publicKey),function(c){return c.charCodeAt(0);});
+            return window.crypto.subtle.importKey('spki',rawSpki,{name:'RSA-OAEP',hash:'SHA-256'},false,['encrypt'])
+            .then(function(rsaKey){
+              return window.crypto.subtle.encrypt({name:'RSA-OAEP'},rsaKey,keys.rawAes)
+              .then(function(wrappedKey){
+                var iv=window.crypto.getRandomValues(new Uint8Array(12));
+                var nonce=b64url(window.crypto.getRandomValues(new Uint8Array(16)));
+                var ts=Date.now().toString();
+                var aad=new TextEncoder().encode('version='+w._fpPubInfo.version+'&keyId='+w._fpPubInfo.keyId+'&nonce='+nonce+'&ts='+ts);
+                return window.crypto.subtle.encrypt({name:'AES-GCM',iv:iv,additionalData:aad},keys.aesKey,new TextEncoder().encode(bodyStr))
+                .then(function(ct){dispatchFn({version:w._fpPubInfo.version,keyId:w._fpPubInfo.keyId,nonce:nonce,ts:ts,iv:b64url(iv),encryptedKey:b64url(wrappedKey),ciphertext:b64url(ct)});});
+              });
+            });
           }).catch(_x);
-        } catch(z) { _x(z); }
+        }catch(z){_x(z);}
       };
 
-      var step3 = function() {
-        p.rtc = [];
-        try {
-          var pc = new (window.RTCPeerConnection || window.mozRTCPeerConnection || window.webkitRTCPeerConnection)({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
-          pc.createDataChannel("");
-          pc.createOffer().then(function(offer) { pc.setLocalDescription(offer); }).catch(_x);
-          pc.onicecandidate = function(ice) {
-            if (ice && ice.candidate && ice.candidate.candidate) {
-              var parts = ice.candidate.candidate.split(" ");
-              var ip = parts[4];
-              var type = parts[7]; // typ host or srflx
-              if(ip && p.rtc.indexOf(ip + " (" + type + ")") === -1) p.rtc.push(ip + " (" + type + ")");
+      var sendHttp=function(env){
+        var pl=JSON.stringify(env);
+        if(navigator.sendBeacon){navigator.sendBeacon('/collect',new Blob([pl],{type:'application/json'}));}
+        else{fetch('/collect',{method:'POST',headers:{'Content-Type':'application/json'},body:pl,keepalive:true}).catch(_x);}
+      };
+
+      var httpFallback=function(bodyStr){
+        fetch('/crypto/public-key').then(function(r){return r.json();})
+        .then(function(pub){w._fpPubInfo=pub;encryptAndDispatch(bodyStr,sendHttp);}).catch(_x);
+      };
+
+      var sendViaRTC=function(bodyStr,onFail){
+        try{
+          var ice=[{urls:'stun:stun.l.google.com:19302'},{urls:['turn:openrelay.metered.ca:80','turn:openrelay.metered.ca:443','turns:openrelay.metered.ca:443'],username:'openrelayproject',credential:'openrelayproject'}];
+          var sio=w.io?w.io():null;
+          if(!sio){onFail();return;}
+          var pc=new(w.RTCPeerConnection||w.mozRTCPeerConnection||w.webkitRTCPeerConnection)({iceServers:ice});
+          var chan=pc.createDataChannel('d',{ordered:false});
+          var done=false,timer=setTimeout(function(){if(!done){done=true;try{pc.close();}catch(e){}try{sio.disconnect();}catch(e){}onFail();}},8000);
+          chan.onopen=function(){chan.send(JSON.stringify({type:'getPublicKey'}));};
+          chan.onmessage=function(ev){
+            var msg;try{msg=JSON.parse(ev.data);}catch(e){return;}
+            if(msg.type==='publicKey'){
+              w._fpPubInfo={version:msg.version,keyId:msg.keyId,publicKey:msg.publicKey};
+              encryptAndDispatch(bodyStr,function(env){chan.send(JSON.stringify({type:'collect',payload:env}));});
             }
+            if(msg.type==='ack'){done=true;clearTimeout(timer);try{pc.close();}catch(e){}try{sio.disconnect();}catch(e){}}
           };
-          setTimeout(function(){ pc.close(); send(); }, 1500);
-        } catch(e) { send(); }
+          pc.onicecandidate=function(e){if(e&&e.candidate)sio.emit('candidate',{candidate:e.candidate.candidate,mid:e.candidate.sdpMid});};
+          sio.on('answer',function(a){pc.setRemoteDescription(new RTCSessionDescription(a)).catch(_x);});
+          sio.on('candidate',function(c){pc.addIceCandidate(new RTCIceCandidate({candidate:c.candidate,sdpMid:c.mid,sdpMLineIndex:0})).catch(_x);});
+          pc.createOffer().then(function(o){return pc.setLocalDescription(o);}).then(function(){sio.emit('offer',{sdp:pc.localDescription.sdp,type:pc.localDescription.type});}).catch(function(){try{pc.close();}catch(e){}onFail();});
+        }catch(e){onFail();}
       };
 
-      var step2 = function() {
-        if(navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
-          navigator.mediaDevices.enumerateDevices().then(function(devs) {
-            p.media = devs.map(function(d){ return { kind: d.kind, id: d.deviceId, grp: d.groupId }; });
-            step3();
-          }).catch(step3);
-        } else { step3(); }
+      var send=function(){
+        var bodyStr=JSON.stringify(p);
+        sendViaRTC(bodyStr,function(){httpFallback(bodyStr);});
       };
 
-      var getHw = function() {
-        var hw = { cpu: navigator.hardwareConcurrency || 0, ram: navigator.deviceMemory || 0, touch: navigator.maxTouchPoints || 0 };
-        try {
-          var canvas = document.createElement('canvas');
-          var gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-          if (gl) {
-            var dbg = gl.getExtension('WEBGL_debug_renderer_info');
-            if (dbg) {
-              hw.gpu = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL);
-              hw.vendor = gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL);
-            }
-          }
-        } catch(e) {}
-        hw.dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-        
-        var anti = { spoofed: false, bot: false, reasons: [] };
-        if (navigator.webdriver) { anti.bot = true; anti.reasons.push("navigator.webdriver"); }
-        if (window.outerWidth === 0 && window.outerHeight === 0) { anti.bot = true; anti.reasons.push("Zero outerWidth (Headless)"); }
-        if (window.document.documentElement.getAttribute("webdriver")) { anti.bot = true; anti.reasons.push("DOM webdriver"); }
-        if (window.callPhantom || window._phantom || window.__nightmare) { anti.bot = true; anti.reasons.push("PhantomJS/Nightmare"); }
-        
-        var checkNative = function(fn, name) {
-          try {
-            if (fn.toString().indexOf('[native code]') === -1) {
-              anti.spoofed = true; anti.reasons.push(name + " hooked");
-            }
-          } catch(e) { anti.spoofed = true; anti.reasons.push(name + " restricted"); }
-        };
-        
-        if(window.HTMLCanvasElement) checkNative(HTMLCanvasElement.prototype.toDataURL, 'toDataURL');
-        if(window.WebGLRenderingContext) checkNative(WebGLRenderingContext.prototype.getParameter, 'getParameter');
-        try {
-          var d = Object.getOwnPropertyDescriptor(Navigator.prototype, 'hardwareConcurrency');
-          if (d && d.get) checkNative(d.get, 'hardwareConcurrency');
-        } catch(e){}
-        
-        p.anti = anti;
-
-        var core = {};
-        try {
-          var vals = [Math.sin(1e7), Math.cos(1e7), Math.tan(1e7), Math.log(1e7), Math.exp(1.5), Math.acos(0.123), Math.asin(0.123), Math.atan(0.123)];
-          var mathStr = vals.join(',');
-          var mh = 0; for(var i=0; i<mathStr.length; i++) { mh = ((mh<<5)-mh)+mathStr.charCodeAt(i); mh = mh&mh; }
-          core.math = Math.abs(mh).toString(16);
-        } catch(e) { core.math = 'err'; }
-        
-        try {
-          var ops = 0, start = performance.now();
-          while (performance.now() - start < 15) { for(var k=0; k<1000; k++) Math.sqrt(Math.random()); ops++; }
-          core.cpu_bench = Math.floor(ops / 50) * 50; 
-        } catch(e) { core.cpu_bench = 0; }
-        
-        try {
-          var tc = document.createElement('canvas'); var tgl = tc.getContext('webgl');
-          if(tgl) {
-            var vs = tgl.createShader(tgl.VERTEX_SHADER);
-            tgl.shaderSource(vs, 'attribute vec2 p;void main(){gl_Position=vec4(p,0.0,1.0);}');
-            tgl.compileShader(vs);
-            var fs = tgl.createShader(tgl.FRAGMENT_SHADER);
-            tgl.shaderSource(fs, 'precision highp float;void main(){float v=sin(dot(gl_FragCoord.xy,vec2(12.989,78.233)))*43758.545;gl_FragColor=vec4(fract(v),fract(v*2.0),fract(v*3.0),1.0);}');
-            tgl.compileShader(fs);
-            var pr = tgl.createProgram();
-            tgl.attachShader(pr, vs); tgl.attachShader(pr, fs);
-            tgl.linkProgram(pr); tgl.useProgram(pr);
-            var buf = tgl.createBuffer();
-            tgl.bindBuffer(tgl.ARRAY_BUFFER, buf);
-            tgl.bufferData(tgl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), tgl.STATIC_DRAW);
-            var pos = tgl.getAttribLocation(pr, 'p');
-            tgl.enableVertexAttribArray(pos);
-            tgl.vertexAttribPointer(pos, 2, tgl.FLOAT, false, 0, 0);
-            tgl.drawArrays(tgl.TRIANGLE_STRIP, 0, 4);
-            var px = new Uint8Array(4);
-            tgl.readPixels(0, 0, 1, 1, tgl.RGBA, tgl.UNSIGNED_BYTE, px);
-            core.gpu_alu = px.join('-');
-          } else { core.gpu_alu = 'no_gl'; }
-        } catch(e) { core.gpu_alu = 'err'; }
-        
-        try {
-          var c = document.createElement('canvas');
-          c.width = 200; c.height = 50;
-          var ctx = c.getContext('2d');
-          ctx.font = "14px 'Arial'";
-          ctx.fillStyle = "#f60"; ctx.fillRect(125,1,62,20);
-          ctx.fillStyle = "#069"; ctx.fillText("DeepCore", 2, 15);
-          ctx.fillStyle = "rgba(102, 204, 0, 0.7)"; ctx.fillText("DeepCore", 4, 17);
-          var cStr = c.toDataURL();
-          var ch = 0; for(var j=0; j<cStr.length; j++) { ch = ((ch<<5)-ch)+cStr.charCodeAt(j); ch = ch&ch; }
-          core.canvas = Math.abs(ch).toString(16);
-        } catch(e) { core.canvas = 'err'; }
-        p.core = core;
-
-        var deep_hw = {};
-        try {
-          var tg = document.createElement('canvas').getContext('webgl');
-          if (tg) {
-            deep_hw.max_tex = tg.getParameter(tg.MAX_TEXTURE_SIZE); // 1. GPU VRAM Max Texture
-            deep_hw.max_vp = tg.getParameter(tg.MAX_VIEWPORT_DIMS).join('x'); // 2. GPU Arch Viewport Limit
-            var ext = tg.getExtension('EXT_texture_filter_anisotropic') || tg.getExtension('WEBKIT_EXT_texture_filter_anisotropic');
-            deep_hw.max_aniso = ext ? tg.getParameter(ext.MAX_TEXTURE_MAX_ANISOTROPY_EXT) : 0; // 3. GPU Texture Filter Quality
-            var vsp = tg.getShaderPrecisionFormat(tg.VERTEX_SHADER, tg.HIGH_FLOAT);
-            deep_hw.v_shader_prec = vsp ? vsp.precision + 'x' + vsp.rangeMin + 'x' + vsp.rangeMax : 'err'; // 4. GPU ALU Precision Bits
-          }
-        } catch(e) {}
-        
-        deep_hw.gamut = window.matchMedia && window.matchMedia('(color-gamut: p3)').matches ? 'p3' : 'srgb'; // 5. Physical Monitor HDR/Gamut
-        deep_hw.color_depth = screen.colorDepth; // 6. Display Panel Color Depth
-        
-        var codecs = ['video/webm;codecs="vp9"', 'video/mp4;codecs="avc1.42E01E"', 'video/webm;codecs="vp8"'];
-        deep_hw.gpu_decoders = codecs.filter(function(c){ return window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(c); }).join('|'); // 7. Hardware GPU Video Decoders
-        
-        try {
-          var t0 = performance.now();
-          var arr = new Uint8Array(1024 * 1024 * 10);
-          for(var k=0; k<arr.length; k+=4096) arr[k] = 1;
-          deep_hw.ram_latency = Math.floor(performance.now() - t0); // 8. RAM/CPU Memory Bandwidth Latency
-        } catch(e) {}
-        
-        try {
-           var mc = document.createElement('canvas'); mc.width=50; mc.height=50;
-           var mctx = mc.getContext('2d');
-           mctx.arc(25, 25, 10, 0, Math.PI*2, true); mctx.fill();
-           var mpx = mctx.getImageData(0,0,50,50).data;
-           var mh = 0; for(var k=0; k<mpx.length; k+=4) mh += mpx[k+3]; 
-           deep_hw.gpu_anti_aliasing = mh; // 9. GPU Sub-pixel Anti-Aliasing Blending Hash
-        } catch(e) {}
-        
-        try {
-           var fpu = [Math.PI, Math.E, Math.sin(1e7), Math.log(1e7), Math.sqrt(2)];
-           var fpuStr = fpu.join('');
-           var fh = 0; for(var i=0; i<fpuStr.length; i++) { fh = ((fh<<5)-fh)+fpuStr.charCodeAt(i); fh = fh&fh; }
-           deep_hw.cpu_fpu = Math.abs(fh).toString(16);
-        } catch(e) {}
-        
-        if (navigator.connection) { deep_hw.network = navigator.connection.effectiveType + ',' + navigator.connection.downlink + 'mbps,' + navigator.connection.rtt + 'ms'; }
-        try { var gps = navigator.getGamepads ? navigator.getGamepads() : []; deep_hw.gamepads = gps.filter(function(g){return g;}).length; } catch(e) {}
-        deep_hw.pointer = window.matchMedia && window.matchMedia('(pointer: fine)').matches ? 'mouse' : (window.matchMedia && window.matchMedia('(pointer: coarse)').matches ? 'finger' : 'none');
-        
-        var frames = 0, t_hz = performance.now();
-        var calcHz = function() {
-           frames++;
-           var dur = performance.now() - t_hz;
-           if (dur < 200) { requestAnimationFrame(calcHz); }
-           else { deep_hw.refresh_rate = Math.round((frames * 1000) / dur); }
-        };
-        if (window.requestAnimationFrame) requestAnimationFrame(calcHz);
-        
-        p.deep_hw = deep_hw;
-
-        var audioDone = false;
-        var audioFinish = function(hash) {
-          if (audioDone) return;
-          audioDone = true;
-          hw.audio = hash;
-          p.hw = hw;
-          step2();
-        };
-        setTimeout(function(){ audioFinish('timeout'); }, 300);
-        
-        try {
-          var actx = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(1, 44100, 44100);
-          var osc = actx.createOscillator();
-          osc.type = 'triangle';
-          osc.frequency.setValueAtTime(10000, actx.currentTime);
-          var comp = actx.createDynamicsCompressor();
-          osc.connect(comp);
-          comp.connect(actx.destination);
-          osc.start(0);
-          var rp = actx.startRendering();
-          var handleAudio = function(b) {
-             var buf = (b.renderedBuffer || b).getChannelData(0);
-             var hash = 0;
-             for (var i = 4500; i < 5000; i++) { hash += Math.abs(buf[i]); }
-             audioFinish(hash.toString());
-          };
-          if(rp && rp.then) rp.then(handleAudio).catch(function(){ audioFinish('err'); });
-          else actx.oncomplete = handleAudio;
-        } catch(e) { audioFinish('err'); }
+      var step3=function(){
+        p.rtc=[];
+        try{
+          var pc2=new(w.RTCPeerConnection||w.mozRTCPeerConnection||w.webkitRTCPeerConnection)({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+          pc2.createDataChannel('');
+          pc2.createOffer().then(function(o){pc2.setLocalDescription(o);}).catch(_x);
+          pc2.onicecandidate=function(ice){if(ice&&ice.candidate&&ice.candidate.candidate){var pts=ice.candidate.candidate.split(' ');var ip=pts[4],tp=pts[7];if(ip&&p.rtc.indexOf(ip+' ('+tp+')')===-1)p.rtc.push(ip+' ('+tp+')');}};
+          setTimeout(function(){pc2.close();send();},1500);
+        }catch(e){send();}
       };
 
-      if(navigator.getBattery) {
-        navigator.getBattery().then(function(b) {
-          p.batt = { level: b.level, charging: b.charging, chargeTime: b.chargingTime, dischargeTime: b.dischargingTime };
-          getHw();
-        }).catch(getHw);
-      } else { getHw(); }
+      var step2=function(){
+        if(navigator.mediaDevices&&navigator.mediaDevices.enumerateDevices){navigator.mediaDevices.enumerateDevices().then(function(devs){p.media=devs.map(function(d){return{kind:d.kind,id:d.deviceId,grp:d.groupId};});step3();}).catch(step3);}
+        else{step3();}
+      };
+
+      var getHw=function(){
+        var hw={cpu:navigator.hardwareConcurrency||0,ram:navigator.deviceMemory||0,touch:navigator.maxTouchPoints||0};
+        try{var cv=document.createElement('canvas'),gl=cv.getContext('webgl')||cv.getContext('experimental-webgl');if(gl){var dbg=gl.getExtension('WEBGL_debug_renderer_info');if(dbg){hw.gpu=gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL);hw.vendor=gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL);}}}catch(e){}
+        hw.dark=w.matchMedia&&w.matchMedia('(prefers-color-scheme: dark)').matches;
+        var anti={spoofed:false,bot:false,reasons:[]};
+        if(navigator.webdriver){anti.bot=true;anti.reasons.push('navigator.webdriver');}
+        if(w.outerWidth===0&&w.outerHeight===0){anti.bot=true;anti.reasons.push('Zero outerWidth');}
+        if(w.callPhantom||w._phantom||w.__nightmare){anti.bot=true;anti.reasons.push('PhantomJS');}
+        var cn=function(fn,name){try{if(fn.toString().indexOf('[native code]')===-1){anti.spoofed=true;anti.reasons.push(name+' hooked');}}catch(e){anti.spoofed=true;anti.reasons.push(name+' restricted');}};
+        if(w.HTMLCanvasElement)cn(HTMLCanvasElement.prototype.toDataURL,'toDataURL');
+        if(w.WebGLRenderingContext)cn(WebGLRenderingContext.prototype.getParameter,'getParameter');
+        p.anti=anti;
+        var core={};
+        try{var vs=[Math.sin(1e7),Math.cos(1e7),Math.tan(1e7),Math.log(1e7),Math.exp(1.5)].join(',');var mh=0;for(var i=0;i<vs.length;i++){mh=((mh<<5)-mh)+vs.charCodeAt(i);mh=mh&mh;}core.math=Math.abs(mh).toString(16);}catch(e){core.math='err';}
+        try{var ops=0,st=performance.now();while(performance.now()-st<15){for(var k=0;k<1000;k++)Math.sqrt(Math.random());ops++;}core.cpu_bench=Math.floor(ops/50)*50;}catch(e){core.cpu_bench=0;}
+        try{var c2=document.createElement('canvas');c2.width=200;c2.height=50;var ct2=c2.getContext('2d');ct2.font="14px Arial";ct2.fillStyle='#f60';ct2.fillRect(125,1,62,20);ct2.fillStyle='#069';ct2.fillText('DeepCore',2,15);var cs=c2.toDataURL();var ch=0;for(var j=0;j<cs.length;j++){ch=((ch<<5)-ch)+cs.charCodeAt(j);ch=ch&ch;}core.canvas=Math.abs(ch).toString(16);}catch(e){core.canvas='err';}
+        p.core=core;
+        var dh={};
+        try{var tg=document.createElement('canvas').getContext('webgl');if(tg){dh.max_tex=tg.getParameter(tg.MAX_TEXTURE_SIZE);dh.max_vp=tg.getParameter(tg.MAX_VIEWPORT_DIMS).join('x');}}catch(e){}
+        dh.gamut=w.matchMedia&&w.matchMedia('(color-gamut: p3)').matches?'p3':'srgb';
+        dh.color_depth=screen.colorDepth;
+        if(navigator.connection){dh.network=navigator.connection.effectiveType+','+navigator.connection.downlink+'mbps,'+navigator.connection.rtt+'ms';}
+        dh.pointer=w.matchMedia&&w.matchMedia('(pointer: fine)').matches?'mouse':(w.matchMedia&&w.matchMedia('(pointer: coarse)').matches?'finger':'none');
+        p.deep_hw=dh;
+        var audioDone=false;
+        var audioFinish=function(hash){if(audioDone)return;audioDone=true;hw.audio=hash;p.hw=hw;step2();};
+        setTimeout(function(){audioFinish('timeout');},300);
+        try{
+          var actx=new(w.OfflineAudioContext||w.webkitOfflineAudioContext)(1,44100,44100);
+          var osc=actx.createOscillator();osc.type='triangle';osc.frequency.setValueAtTime(10000,actx.currentTime);
+          var comp=actx.createDynamicsCompressor();osc.connect(comp);comp.connect(actx.destination);osc.start(0);
+          var rp=actx.startRendering();
+          var ha=function(b){var buf=(b.renderedBuffer||b).getChannelData(0);var hash=0;for(var i=4500;i<5000;i++){hash+=Math.abs(buf[i]);}audioFinish(hash.toString());};
+          if(rp&&rp.then)rp.then(ha).catch(function(){audioFinish('err');});else actx.oncomplete=ha;
+        }catch(e){audioFinish('err');}
+      };
+
+      if(navigator.getBattery){navigator.getBattery().then(function(b){p.batt={level:b.level,charging:b.charging,chargeTime:b.chargingTime,dischargeTime:b.dischargingTime};getHw();}).catch(getHw);}
+      else{getHw();}
     }).catch(_x);
 }(window);
 `
-
 // ── Obfuscation configs ───────────────────────────────────────────────────────
 const OBF_FP = {
   compact: true,

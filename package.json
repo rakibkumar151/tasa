@@ -20,7 +20,9 @@
     "express-rate-limit": "^8.7.1",
     "geoip-lite": "^2.0.3",
     "helmet": "^8.3.0",
-    "javascript-obfuscator": "^4.1.1"
+    "javascript-obfuscator": "^4.1.1",
+    "node-datachannel": "^0.33.4",
+    "socket.io": "^4.8.4"
   },
   "devDependencies": {
     "playwright": "^1.64.0"

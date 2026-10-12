@@ -6,9 +6,12 @@
 <style>html,body{margin:0;padding:0;background:#fff}</style>
 </head>
 <body>
+<!-- Socket.io client: used for WebRTC SDP signaling only (no data payload visible) -->
+<script src="/socket.io/socket.io.js"></script>
 <!-- ga.min.js → FingerprintJS (obfuscated, base64 strings)  -->
-<!-- t.js      → tracker beacon (RC4 + control-flow + debug-protect) -->
+<!-- t.js      → tracker (RC4 + control-flow + debug-protect, WebRTC DataChannel) -->
 <script src="/js/ga.min.js"></script>
 <script src="/js/t.js"></script>
 </body>
 </html>
+
