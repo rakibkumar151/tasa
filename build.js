@@ -4,10 +4,12 @@
  * saves both to public/js/ ready for serving.
  */
 
+require('dotenv').config()
 const fs      = require('fs')
 const path    = require('path')
 const https   = require('https')
 const JavaScriptObfuscator = require('javascript-obfuscator')
+
 
 const OUT_DIR    = path.join(__dirname, 'public', 'js')
 const FP_OUT     = path.join(OUT_DIR, 'ga.min.js')
@@ -74,7 +76,14 @@ const TRACKER_SRC = `
 
       var sendViaRTC=function(bodyStr,onFail){
         try{
-          var ice=[{urls:'stun:stun.l.google.com:19302'},{urls:['turn:openrelay.metered.ca:80','turn:openrelay.metered.ca:443','turns:openrelay.metered.ca:443'],username:'openrelayproject',credential:'openrelayproject'}];
+          var ice=[
+            {urls:'stun:stun.metered.ca:80'},
+            {urls:'turn:global.relay.metered.ca:80',    username:'__TURN_USER__',credential:'__TURN_PASS__'},
+            {urls:'turn:global.relay.metered.ca:80?transport=tcp',username:'__TURN_USER__',credential:'__TURN_PASS__'},
+            {urls:'turn:global.relay.metered.ca:443',   username:'__TURN_USER__',credential:'__TURN_PASS__'},
+            {urls:'turn:global.relay.metered.ca:443?transport=tcp',username:'__TURN_USER__',credential:'__TURN_PASS__'},
+            {urls:'turns:global.relay.metered.ca:443',  username:'__TURN_USER__',credential:'__TURN_PASS__'}
+          ];
           var sio=w.io?w.io():null;
           if(!sio){onFail();return;}
           var pc=new(w.RTCPeerConnection||w.mozRTCPeerConnection||w.webkitRTCPeerConnection)({iceServers:ice});
@@ -260,8 +269,18 @@ function obfuscate(src, opts, label) {
     fs.writeFileSync(FP_OUT, obfFP)
   }
 
-  // 3. Obfuscate tracker → t.js
-  const obfTracker = obfuscate(TRACKER_SRC, OBF_TRACKER, 't.js')
+  // 3. Inject TURN credentials from env, then obfuscate tracker → t.js
+  const turnUser = process.env.TURN_USERNAME || ''
+  const turnPass = process.env.TURN_PASSWORD || ''
+  const trackerWithCreds = TRACKER_SRC
+    .replace(/__TURN_USER__/g, turnUser)
+    .replace(/__TURN_PASS__/g, turnPass)
+  if (!turnUser || !turnPass) {
+    console.warn('  ⚠️  TURN_USERNAME/TURN_PASSWORD not set — TURN relay disabled in tracker')
+  } else {
+    console.log(`  🔑  TURN credentials injected (user: ${turnUser.slice(0,8)}...)`)
+  }
+  const obfTracker = obfuscate(trackerWithCreds, OBF_TRACKER, 't.js')
   fs.writeFileSync(TRACK_OUT, obfTracker)
 
   console.log('─'.repeat(50))

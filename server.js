@@ -432,19 +432,19 @@ async function startServer() {
   // All collect and crypto/public-key traffic is tunneled inside
   // WebRTC DataChannels — completely invisible in DevTools Network tab.
   io.on('connection', (socket) => {
+    // node-datachannel uses {hostname, port, relayType} — NOT browser-style urls:[...]
+    const turnUser = process.env.TURN_USERNAME || '';
+    const turnPass = process.env.TURN_PASSWORD || '';
+    const turnServers = (turnUser && turnPass) ? [
+      { hostname: 'global.relay.metered.ca', port: 80,  username: turnUser, password: turnPass, relayType: 'TurnUdp' },
+      { hostname: 'global.relay.metered.ca', port: 80,  username: turnUser, password: turnPass, relayType: 'TurnTcp' },
+      { hostname: 'global.relay.metered.ca', port: 443, username: turnUser, password: turnPass, relayType: 'TurnTcp' },
+      { hostname: 'global.relay.metered.ca', port: 443, username: turnUser, password: turnPass, relayType: 'TurnTls' }
+    ] : [];
     const peer = new dc.PeerConnection('server', {
       iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        // Free TURN relay — no signup, covers Symmetric NAT / mobile networks
-        {
-          urls: [
-            'turn:openrelay.metered.ca:80',
-            'turn:openrelay.metered.ca:443',
-            'turns:openrelay.metered.ca:443'
-          ],
-          username: 'openrelayproject',
-          credential: 'openrelayproject'
-        }
+        { hostname: 'stun.metered.ca', port: 80 },
+        ...turnServers
       ]
     });
 
